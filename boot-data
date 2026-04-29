@@ -1,0 +1,266 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+# vim: set ts=4 sw=4 et :
+#
+# boot-data - show info from a boot-data file in a friendly way
+#
+# todo:
+#  - add show command - show an individual item
+#  - add diff command - do a smart diff between two files
+#  - add compare command - compare individual values between two files
+
+import sys
+import os
+import re
+from signal import signal, SIGPIPE, SIG_DFL
+import boot_data_parser
+
+VERSION = (0,5,0)
+
+debug = False
+verbose = False
+
+def eprint(msg):
+    sys.stderr.write("Error: " + msg + '\n')
+    sys.stderr.flush()
+
+def error_out(msg, rcode=-1):
+    eprint(msg)
+    sys.exit(rcode)
+
+def dprint(msg):
+    global debug
+
+    if debug:
+        print("DEBUG: " + str(msg))
+
+def vprint(msg):
+    global verbose
+
+    if verbose:
+        print(msg)
+
+def usage():
+    print("""Usage: boot-data [<file>] <cmd> [<item>] <options>
+Look up information in a boot-data file (produced by
+grab-boot-data.sh), or compare information from two
+boot-data files.
+
+Specify one or more boot-data files, and possibly a data item
+name, along with one of the commands below:
+
+Commands:
+  list         List the boot data items that can be shown
+  show         Show an individual data item with it's value
+  compare      Compare data items in two different files
+  diff         Do a time-smart diff of two boot-data files
+
+Options:
+ -h, --help    Show this usage help
+ -f <file>     Use this option to specify a second file for comparison
+               commands to operate on
+ -v            Show verbose output
+ --debug       Show debug information
+""")
+    sys.exit(0)
+
+def show_version():
+    print("boot-data - version %d.%d.%d" % VERSION)
+    sys.exit(0)
+
+# define some routines for argument handling
+def get_opt_with_arg(arg):
+    try:
+        arg_pos = sys.argv.index(arg)
+        var = sys.argv[arg_pos + 1]
+        del sys.argv[arg_pos + 1]
+        del sys.argv[arg_pos]
+    except IndexError:
+        error_out("Missing argument to '%s'. Use -h for help" % arg)
+
+    return var
+
+def get_boolean_opt(arg):
+    if arg in sys.argv:
+        sys.argv.remove(arg)
+        return True
+    else:
+        return False
+
+# put a wrapper around subprocess execution
+# if in verbose mode,
+#   output to my stdout while the subprocess is running
+#   and return the empty string as output
+# else use getstatusoutput to capture (and hide) the subprocess output.
+# returns (status, output)
+def execute(cmd, verbose=False):
+    if verbose:
+        try:
+            result = subprocess.run(cmd, shell=True)
+            status = result.returncode
+            output = ""
+        except subprocess.CalledProcessError as cp:
+            status = cp.returncode
+            output = cp.output
+
+        return (status, output)
+    else:
+        return getstatusoutput(cmd)
+
+def do_list(file1):
+    global verbose
+
+    print("""List of items (and item types) that can be shown:
+== general data item types
+  initcalls, by function name (e.g. alsa_pcm_init)
+  regions
+  meta-data items
+  config options, by name (e.g. CONFIG_BT)
+""")
+
+    if not file1:
+        print("NOTE: Specify a boot-data file to see the list of items available in that file")
+        sys.exit(0)
+
+    print("== Specific data items in %s" % os.path.basename(file1))
+    bd = boot_data_parser.parse_boot_data(None, file1)
+
+    # show different data items
+    print("Meta-data items:")
+    metas = list(bd.available_metas())
+    metas.sort()
+    for name in metas:
+        print("  " + name)
+
+    print("Initcalls:")
+    ic_list = list(bd.initcalls.keys())
+    ic_list.sort()
+    for ic in ic_list:
+        print("  " + ic)
+
+    print("Regions:")
+    reg_list = list(bd.regions.keys())
+    reg_list.sort()
+    for region in reg_list:
+        print("  " + region)
+
+    if verbose:
+        print("CONFIGS:")
+        cname_list = list(bd.CONFIGS.keys())
+        # cnames are short names (missing the 'CONFIG_' prefix)
+        cname_list.sort()
+        for cname in cname_list:
+            print("  CONFIG_" + cname)
+    else:
+        print("NOTE: CONFIGS can be shown with -v")
+
+    sys.exit(0)
+
+def do_show(file1, options):
+    try:
+        item = options[0]
+    except IndexError:
+        error_out("Missing name of data item to show (use -h for help)")
+
+    bd = boot_data_parser.parse_boot_data(None, file1)
+
+    found = False
+    if item in bd.available_metas():
+        value = bd.get_meta(item)
+        found = True
+    elif item in bd.initcalls:
+        value = bd.initcalls[item]
+        found = True
+
+    if not found or value=="**missing**":
+        error_out("Could not find '%s' in boot data file %s" % (item, file1))
+
+    if verbose:
+        print(item+"=", end='')
+    print(value)
+    sys.exit(0)
+
+def do_compare(file1, file2, options):
+    print("FIXTHIS - Need to implement 'compare' command")
+
+def do_diff(file1, file2, options):
+    print("FIXTHIS - Need to implement 'diff' command")
+
+def do_top(file1, options):
+    print("FIXTHIS - Need to implement 'top' command")
+
+def main():
+    global debug
+    global verbose
+
+    # allow error-free piping to other command line utilities (like 'head')
+    signal(SIGPIPE, SIG_DFL)
+
+    # parse command line arguments
+    file1 = None
+    file2 = None
+
+    if "-h" in sys.argv or "--help" in sys.argv:
+        usage()
+    if '-V' in sys.argv or '--version' in sys.argv:
+        show_version()
+
+    verbose = get_boolean_opt('-v')
+    debug = get_boolean_opt('--debug')
+
+    # flow debug setting into boot_data_parser (if needed)
+    if debug:
+        boot_data_parser.set_debug(debug)
+
+    if get_boolean_opt('list'):
+        cmd = "list"
+
+    if get_boolean_opt('show'):
+        cmd = "show"
+
+    if get_boolean_opt('diff'):
+        cmd = "diff"
+
+    if get_boolean_opt('compare'):
+        cmd = "compare"
+
+    if "-f" in sys.argv:
+        file2 = get_opt_with_arg('-f')
+        if not os.path.isfile(file2):
+            error_out("'%s' is not a regular file" % file2)
+
+    # done with general parsable args...
+    # first non-arg should be the boot data file
+    try:
+        file1 = sys.argv[1]
+        sys.argv.remove(file1)
+    except IndexError:
+        if cmd != "list":
+            error_out("Missing boot-data file argument (use -h for help)")
+
+    # sanity check some args
+    if file1 and not os.path.isfile(file1):
+        error_out("Missing or invalid boot-data file: %s" % file1)
+
+    if cmd in ["compare", "diff"] and not file2:
+        error_out("Missing second boot-data file argument\n  (use -f to specify, and -h for help)")
+
+    options = sys.argv[1:]
+
+    # done parsing command line
+    if cmd == "list":
+        do_list(file1)
+
+    if cmd == "show":
+        do_show(file1, options)
+
+    if cmd == "compare":
+        do_compare(file1, file2, options)
+
+    if cmd == "compare":
+        do_diff(file1, file2, options)
+
+    error_out("Unrecognized command '%s'" % cmd)
+
+if __name__ == "__main__":
+    main()
