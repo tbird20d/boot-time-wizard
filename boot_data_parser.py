@@ -76,35 +76,46 @@ class boot_data_class:
         # eliminate symlinks in the path
         self.filepath = os.path.realpath(filepath)
 
-        filename = os.path.basename(filepath)
+        filename = os.path.basename(self.filepath)
         self.filename = filename
+        self.lab = "unknown_lab"
+        self.machine = "unknown_machine"
 
         # remove '-ref-values" from path if present
         # c_filename = converted filename
         c_filename = filename.replace("-ref-values","")
 
-        try:
-            lab_machine = c_filename[10:-18]
-        except:
-            lab_machine = "unknown_lab-unknown_machine"
+        # try to extract data from the boot data filename
+        # (this may not be needed, since it should be in the GBD info section)
+        pos = c_filename.find("boot-data-")
+        if pos != -1:
+            try:
+                lab_machine = c_filename[pos+10:-18]
+                # Note: this parse doesn't work if lab name has a '-' in it
+                # grab-boot-data.sh should convert '-' to '_' in the labname
+                # in the filename
+                self.lab, self.machine = lab_machine.split("-",1)
+            except:
+                pass
 
-        # Note: this parse doesn't work if lab name has a '-' in it
-        # grab-boot-data.sh should convert '-' to '_' in the filename
-        self.lab, self.machine = lab_machine.split("-",1)
-        self.timestamp = c_filename[-17:-4]
-        date_str, time_str = self.timestamp.split("-",1)
-        year = int(date_str[0:2])+2000
-        month = int(date_str[2:4])
-        day = int(date_str[4:6])
-        self.date = (year, month, day)
-        dt = date(*self.date)
-        self.date_str = dt.strftime("%d %b %Y")
-        hour = int(time_str[0:2])
-        minute = int(time_str[2:4])
-        second = int(time_str[4:6])
-        self.time = (hour, minute, second)
-        t = time(*self.time)
-        self.time_str = t.strftime("%H:%M:%S")
+            try:
+                self.timestamp = c_filename[-17:-4]
+                date_str, time_str = self.timestamp.split("-",1)
+                year = int(date_str[0:2])+2000
+                month = int(date_str[2:4])
+                day = int(date_str[4:6])
+                self.date = (year, month, day)
+                dt = date(*self.date)
+                self.date_str = dt.strftime("%d %b %Y")
+                hour = int(time_str[0:2])
+                minute = int(time_str[2:4])
+                second = int(time_str[4:6])
+                self.time = (hour, minute, second)
+                t = time(*self.time)
+                self.time_str = t.strftime("%H:%M:%S")
+            except:
+                pass
+
         # initcalls: key=initcall function name, value = duration
         self.initcalls = {}
         # region: key=reg_name, value = duration
@@ -121,6 +132,8 @@ class boot_data_class:
         self.CONFIGS = {}
         self.ARCH = "unknown"
         self.parse_errors = []
+        # this includes global values (SYSTEMD_...) and unit durations
+        self.systemd_items = {}
 
     def get(self, region_name, default):
         if region_name.startswith("initcall_"):
@@ -129,8 +142,12 @@ class boot_data_class:
                 return self.initcalls[ic_name]
             else:
                 return default
-        if region_name in self.regions:
+        elif region_name in self.initcalls:
+            return self.initcalls[region_name]
+        elif region_name in self.regions:
             return self.regions[region_name]
+        elif region_name in self.systemd_items:
+            return self.systemd_items[region_name]
         else:
             return default
 
@@ -140,15 +157,34 @@ class boot_data_class:
             return self.CONFIGS.get(cname, default)
         return self.__dict__.get(meta_name, default)
 
+    # get any type of data (meta or other)
+    def get_any(self, name, default="**missing**"):
+        value = self.get_meta(name, default)
+        if value == "**missing**":
+            value = self.get(name, default)
+        return value
+
     def available_metas(self):
         metas = list(self.__dict__.keys())
         for name in ["initcalls", "CONFIGS", "regions", "reg_stack", "reg_list",
-                     "CONFIG", "parse_errors"]:
+                     "CONFIG", "parse_errors", "systemd_items"]:
             try:
                 metas.remove(name)
             except ValueError:
                 print("in available_metas: %s not in self.__dict__" % name)
         return metas
+
+    def available_items(self, include_configs = True):
+        initcalls = list(self.initcalls.keys())
+        regions = list(self.regions.keys())
+        systemd_items = list(self.systemd_items.keys())
+
+        item_list = self.available_metas() + initcalls + regions + systemd_items
+        if include_configs:
+            config_list = ["CONFIG_" + k for k in self.CONFIGS.keys()]
+            return item_list + config_list
+        else:
+            return item_list
 
     def show(self):
         msg = "boot data for " + self.filename + "\n"
@@ -201,6 +237,8 @@ def line_time_to_microsecs(line):
 
 def parse_GBD_info(req, bd, block):
     for line in block:
+        # early versions of grab-boot-data didn't provide
+        # GBD_LAB and GBD_MACHINE
         if line.startswith("ARGS=") or line.startswith("GBD_ARGS="):
             args_str = line.split("=", 1)[1].strip().strip('"')
             bd.GBD_ARGS = args_str
@@ -218,6 +256,34 @@ def parse_GBD_info(req, bd, block):
         if line.startswith("GBD_VERSION="):
             version_str = line.split("=", 1)[1].strip().strip('"')
             bd.GBD_VERSION = version_str
+            continue
+
+        if line.startswith("GBD_TIMESTAMP="):
+            bd.timestamp = line.split("=", 1)[1].strip().strip('"')
+            date_str, time_str = self.timestamp.split("-",1)
+            year = int(date_str[0:2])+2000
+            month = int(date_str[2:4])
+            day = int(date_str[4:6])
+            bd.date = (year, month, day)
+            dt = date(*self.date)
+            bd.date_str = dt.strftime("%d %b %Y")
+            hour = int(time_str[0:2])
+            minute = int(time_str[2:4])
+            second = int(time_str[4:6])
+            bd.time = (hour, minute, second)
+            t = time(*self.time)
+            bd.time_str = t.strftime("%H:%M:%S")
+            continue
+
+        # override ARG-based lab and machine from GBD vars
+        if line.startswith("GBD_LAB="):
+            lab = line.split("=", 1)[1].strip().strip('"')
+            bd.lab = lab
+            continue
+
+        if line.startswith("GBD_MACHINE="):
+            machine= line.split("=", 1)[1].strip().strip('"')
+            self.machine = machine
             continue
 
 
@@ -299,6 +365,49 @@ def parse_os(req, bd, block):
             setattr(bd, name, value)
 
     return
+
+def parse_systemd_info(req, bd, block):
+    #req.add_to_message("block='%s'" % block)
+
+    for line in block:
+        if line.startswith("Startup finished"):
+            regex = r"Startup finished in ([0-9.s]+) \(kernel\) [+] ([0-9.s]+) .* = ([0-9.s]+)"
+            m = re.match(regex, line)
+            if m:
+                g = m.groups()
+                # convert seconds to usecs
+                kern_usecs = int(float(g[0][:-1]) * 1000000)
+                user_usecs = int(float(g[1][:-1]) * 1000000)
+                full_usecs = int(float(g[2][:-1]) * 1000000)
+                bd.SYSTEMD_KERNEL_USECS = kern_usecs
+                bd.systemd_items["SYSTEMD_KERNEL_USECS"] = kern_usecs
+                bd.SYSTEMD_USERSPACE_USECS = user_usecs
+                bd.systemd_items["SYSTEMD_USERSPACE_USECS"] = user_usecs
+                bd.SYSTEMD_FULL_START_USECS = full_usecs
+                bd.systemd_items["SYSTEMD_FULL_START_USECS"] = full_usecs
+
+            else:
+                req.add_to_message("Warning: no regex match on 'Startup finished' line in SYSTEMD INFO section")
+            continue
+
+        m = re.match("[ ]*([0-9.ms]+) (.*)", line)
+        if m:
+            g = m.groups()
+            name = g[1]
+            value_str = g[0]
+            if value_str[-2:] == "ms":
+                duration = int(value_str[:-2]) * 1000
+            elif re.match("[0-9]s", value_str):
+                duration = int(value_str[:-1]) * 1000000
+            else:
+                req.debug_log("can't parse duration on systemd line '%s'" % line)
+                continue
+
+            bd.systemd_items[name] = duration
+
+    return
+
+
 
 # has (printk match string, region name, printk source file, start or end indicator)
 # start = printk indicates start of a region, end is another printk
@@ -427,6 +536,8 @@ def parse_boot_data(req, filepath):
                 parse_os(req, bd, block)
             elif section == "CONFIG":
                 bd.CONFIG = block
+            elif section == "SYSTEMD INFO":
+                parse_systemd_info(req, bd, block)
 
             new_section = line[3:].strip()
             if not new_section.endswith(" =="):
