@@ -58,6 +58,8 @@
 #   - sysfs info -> driver/feature -> config or DT node
 #
 
+VERSION=(0,5,0)
+
 import sys
 import os
 import re
@@ -69,6 +71,10 @@ import random
 
 debug = False
 verbose = False
+
+DEFAULT_GBD_SCRIPT_PATH = "/usr/local/bin"
+ALTERNATE_GBD_SCRIPT_PATH = "/home/tbird/bin"
+gbd_script_path = None
 
 # use run_prefix to distinguish files in the artifact directory
 run_prefix = "run-000000-"
@@ -693,15 +699,28 @@ def list_methods(methods, target):
 
 def try_one_method(method, target, artifact_dir):
     global run_prefix, kernel_id
+    global gbd_script_path
 
     print("##################################################")
     print("== Trying optimization method: %s" % method.name)
 
     print("== Preparing target: %s" % target.name)
     vprint(" - Installing grab-boot-data.sh...")
-    target.put("/home/tbird/bin/grab-boot-data.sh", "/usr/local/bin")
+    # find suitable destination directory
+    #  see if /usr/local/bin exists on target
+    dest_dir = "/usr/local/bin"
+    rcode, output = target.run("ls " + dest_dir)
+    if "No such" in output:
+        dest_dir = "/usr/bin"
+        rcode, output = target.run("ls " + dest_dir)
+        if "No such" in output:
+            dest_dir = "/bin"
+
+    target.put(gbd_script_path, dest_dir)
+    # FIXTHIS - should record dest_dir for later cleanup
+
     vprint(" - Gathering baseline boot data...")
-    target.run("chmod a+x /usr/local/bin/grab-boot-data.sh")
+    target.run("chmod a+x %s/grab-boot-data.sh" % dest_dir)
 
     print("== Instrumenting target: %s, for method %s" % (target.name, method.name))
     method.instrument_target(target)
@@ -793,6 +812,31 @@ def tune_boot_time(methods, target, artifact_dir):
 
     print("Final tuning recommendations:...")
 
+def report_header(run_id, tname, saved_args):
+    global VERSION
+
+    from datetime import datetime
+
+    now = datetime.now()
+    time_str = now.strftime("%Y-%02m-%02d_%02H:%02M:%02S")
+    header = """Boot-Time Tuning Wizard Report
+==========================================
+DATE_AND_TIME=%s
+RUN_ID=%s
+TARGET_NAME=%s
+BTTW_ARGS='%s'
+BTTW_VERSION=%s.%s.%s
+==========================================
+""" % (time_str, run_id, tname, saved_args, \
+       VERSION[0], VERSION[1], VERSION[2])
+
+    return header
+
+def log_to_report(artifact_dir, msg):
+    report_path = artifact_dir + "/" + run_prefix + "report.txt"
+    with open(report_path, "a") as report_file:
+        report_file.write(msg)
+
 def get_opt_with_arg(arg):
     try:
         arg_pos = sys.argv.index(arg)
@@ -811,10 +855,37 @@ def get_boolean_opt(arg):
     else:
         return False
 
+# set global gbd_script_path, where grab-boot-data.sh can
+# be found, to use on the target
+def find_gbd_script_path(script_dir):
+    global gbd_script_path
+
+    # try some different alternatives
+    script_path = script_dir + "/grab-boot-data.sh"
+    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+        gbd_script_path = script_path
+        return
+
+    script_path = DEFAULT_GBD_SCRIPT_PATH + "/grab-boot-data.sh"
+    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+        gbd_script_path = script_path
+        return
+
+    script_path = ALTERNATE_GBD_SCRIPT_PATH + "/grab-boot-data.sh"
+    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+        gbd_script_path = script_path
+        return
+
+    error_out("Can't find grab-boot-data.sh on system!")
+
+
 def main():
     global debug
     global verbose
     global run_prefix, kernel_id
+
+    saved_args = sys.argv[1:]
+    script_dir = os.path.dirname(sys.argv[0])
 
     # allow error-free piping to other command line utilities (like 'head')
     signal(SIGPIPE, SIG_DFL)
@@ -924,10 +995,10 @@ def main():
         method.undo_optimization(target)
 
         method.show_results()
-        # save the report to a file
-        report_path = artifact_dir + "/" + run_prefix + "report.txt"
-        report_file = open(report_path, "w")
-        report_file.write(method.results_txt)
+
+        # save results to a report file
+        header = report_header(run_prefix[:-1], target.name, saved_args)
+        log_to_report(artifact_dir, header + method.results_txt)
     else:
         tune_boot_time(methods, target, artifact_dir)
 

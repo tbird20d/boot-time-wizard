@@ -260,18 +260,18 @@ def parse_GBD_info(req, bd, block):
 
         if line.startswith("GBD_TIMESTAMP="):
             bd.timestamp = line.split("=", 1)[1].strip().strip('"')
-            date_str, time_str = self.timestamp.split("-",1)
+            date_str, time_str = bd.timestamp.split("-",1)
             year = int(date_str[0:2])+2000
             month = int(date_str[2:4])
             day = int(date_str[4:6])
             bd.date = (year, month, day)
-            dt = date(*self.date)
+            dt = date(*bd.date)
             bd.date_str = dt.strftime("%d %b %Y")
             hour = int(time_str[0:2])
             minute = int(time_str[2:4])
             second = int(time_str[4:6])
             bd.time = (hour, minute, second)
-            t = time(*self.time)
+            t = time(*bd.time)
             bd.time_str = t.strftime("%H:%M:%S")
             continue
 
@@ -283,7 +283,7 @@ def parse_GBD_info(req, bd, block):
 
         if line.startswith("GBD_MACHINE="):
             machine= line.split("=", 1)[1].strip().strip('"')
-            self.machine = machine
+            bd.machine = machine
             continue
 
 

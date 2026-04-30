@@ -66,8 +66,8 @@ Options:
             data file to a machine that does have networking and curl,
             and then upload the file using -u.
 
---version   Show program version information
---debug     Show debug information while running
+ -V,--version Show program version information
+ --debug    Show debug information while running
 HERE
 }
 
@@ -123,7 +123,7 @@ while [ -n "$1" ] ; do
             UPLOAD_FILE=$1
             shift
             ;;
-        --version)
+        -V|--version)
             echo "grab-boot-data.sh Version $VERSION"
             exit 0
             ;;
