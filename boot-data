@@ -5,9 +5,7 @@
 # boot-data - show info from a boot-data file in a friendly way
 #
 # todo:
-#  - add show command - show an individual item
 #  - add diff command - do a smart diff between two files
-#  - add compare command - compare individual values between two files
 
 import sys
 import os
@@ -19,6 +17,12 @@ VERSION = (0,5,0)
 
 debug = False
 verbose = False
+
+# define some defaults
+dur_thresh_percent = 0
+duration_threshold = 10000
+have_threshold = False
+max_count = 10
 
 def eprint(msg):
     sys.stderr.write("Error: " + msg + '\n')
@@ -49,9 +53,13 @@ boot-data files.
 Specify one or more boot-data files, and possibly a data item
 name, along with one of the commands below:
 
+In general, numbers that represent durations are in micro-seconds.
+(So 54000 = 54ms, and 1300000 = 1.3s)
+
 Commands:
   list         List the boot data items that can be shown
   show         Show an individual data item with it's value
+  top          Show durations above a threshhold (default 10 ms)
   compare      Compare data items in two different files
   diff         Do a time-smart diff of two boot-data files
 
@@ -59,6 +67,13 @@ Options:
  -h, --help    Show this usage help
  -f <file>     Use this option to specify a second file for comparison
                commands to operate on
+ -d <ms>       Specify a threshold for the 'top' command, in milliseconds.
+               Durations over the specified threshold will be shown
+ -c <count>    Specify the max number of items to show for the 'top' command.
+ -t <type>     Specify the type of items to show for the 'top' command.
+               <type> can be 'initcall', 'region', 'systemd'.
+ -p <percent>  Specify the duration threshold as a percent of baseline value.
+               (e.g. for 10, only show values 10% different from baseline value)
  -v            Show verbose output
  --debug       Show debug information
 """)
@@ -107,14 +122,15 @@ def execute(cmd, verbose=False):
     else:
         return getstatusoutput(cmd)
 
-def do_list(file1):
+def do_list(file1, item_type):
     global verbose
 
     print("""List of items (and item types) that can be shown:
 == general data item types
+  meta-data items
   initcalls, by function name (e.g. alsa_pcm_init)
   regions
-  meta-data items
+  systemd items, by unit name (e.g. systemd-journal.service)
   config options, by name (e.g. CONFIG_BT)
 """)
 
@@ -126,25 +142,35 @@ def do_list(file1):
     bd = boot_data_parser.parse_boot_data(None, file1)
 
     # show different data items
-    print("Meta-data items:")
-    metas = list(bd.available_metas())
-    metas.sort()
-    for name in metas:
-        print("  " + name)
+    if item_type == "meta" or item_type == None:
+        print("Meta-data items:")
+        metas = list(bd.available_metas())
+        metas.sort()
+        for name in metas:
+            print("  " + name)
 
-    print("Initcalls:")
-    ic_list = list(bd.initcalls.keys())
-    ic_list.sort()
-    for ic in ic_list:
-        print("  " + ic)
+    if item_type == "initcall" or item_type == None:
+        print("Initcalls:")
+        ic_list = list(bd.initcalls.keys())
+        ic_list.sort()
+        for ic in ic_list:
+            print("  " + ic)
 
-    print("Regions:")
-    reg_list = list(bd.regions.keys())
-    reg_list.sort()
-    for region in reg_list:
-        print("  " + region)
+    if item_type == "region" or item_type == None:
+        print("Regions:")
+        reg_list = list(bd.regions.keys())
+        reg_list.sort()
+        for region in reg_list:
+            print("  " + region)
 
-    if verbose:
+    if item_type == "systemd" or item_type == None:
+        print("Systemd Items:")
+        sd_list = list(bd.systemd_items.keys())
+        sd_list.sort()
+        for item in sd_list:
+            print("  " + item)
+
+    if verbose or item_type == "config":
         print("CONFIGS:")
         cname_list = list(bd.CONFIGS.keys())
         # cnames are short names (missing the 'CONFIG_' prefix)
@@ -152,46 +178,206 @@ def do_list(file1):
         for cname in cname_list:
             print("  CONFIG_" + cname)
     else:
-        print("NOTE: CONFIGS can be shown with -v")
+        if not item_type:
+            print("NOTE: CONFIGS can be shown with -v (or -t config)")
 
     sys.exit(0)
 
 def do_show(file1, options):
-    try:
-        item = options[0]
-    except IndexError:
+    items = options
+
+    if not items:
         error_out("Missing name of data item to show (use -h for help)")
 
     bd = boot_data_parser.parse_boot_data(None, file1)
 
-    found = False
-    if item in bd.available_metas():
-        value = bd.get_meta(item)
-        found = True
-    elif item in bd.initcalls:
-        value = bd.initcalls[item]
-        found = True
+    if items[0] == "all":
+        items = bd.available_items()
+        items.sort()
 
-    if not found or value=="**missing**":
-        error_out("Could not find '%s' in boot data file %s" % (item, file1))
+    doing_multiple = False
+    if len(items) > 1:
+        doing_multiple = True
 
-    if verbose:
-        print(item+"=", end='')
-    print(value)
+    for item in items:
+        value = bd.get_any(item)
+        if value=="**missing**":
+            error_out("Could not find '%s' in boot data file %s" % (item, file1))
+
+        if verbose or doing_multiple:
+            print(item+"=", end='')
+        print(value)
+
     sys.exit(0)
 
 def do_compare(file1, file2, options):
-    print("FIXTHIS - Need to implement 'compare' command")
+    global dur_thresh_percent
+    global duration_threshold
+    global have_threshold
+
+    items = options
+
+    if not items:
+        error_out("Missing name of data item to show (use -h for help)")
+
+    bd1 = boot_data_parser.parse_boot_data(None, file1)
+    bd2 = boot_data_parser.parse_boot_data(None, file2)
+
+    if items[0] == "all":
+        items = bd1.available_items()
+        items.sort()
+
+    # try to detect baseline vs results files
+    # for that, eliminate symlinks, which might mask the filenames
+    rfile1 = os.path.basename(os.path.realpath(file1))
+    rfile2 = os.path.basename(os.path.realpath(file2))
+
+    bd1_type = "unknown"
+    baseline = 0
+    if "baseline" in rfile1:
+        bd1_type = "baseline"
+        baseline = 1
+    if "results" in rfile1:
+        bd1_type = "results"
+    if "ref-value" in rfile1:
+        bd1_type = "ref value"
+
+    bd2_type = ""
+    if "baseline" in rfile2:
+        bd2_type = "baseline"
+        baseline = 2
+    if "results" in rfile2:
+        bd2_type = "results"
+    if "ref-value" in rfile2:
+        bd2_type = "ref value"
+        if not baseline:
+            baseline = 2
+
+    # treat ref value as baseline if baseline is not set
+    if bd1_type == "ref value" and not baseline:
+        baseline = 1
+
+    doing_multiple = False
+    if len(items) > 1:
+        doing_multiple = True
+
+    for item in items:
+        value1 = bd1.get_any(item)
+        value2 = bd2.get_any(item)
+
+        if value1 == "**missing**" and value2 == "**missing**":
+            error_out("Could not find '%s' in boot data files" % item)
+
+        # determine whether to show data and direction
+        show_data = True
+        delta = 0
+        try:
+            value1 = int(value1)
+            value2 = int(value2)
+            delta = value2 - value1
+        except:
+            # not numbers means no direction possible
+            delta = 0
+
+        if delta > 0:
+            dir_str = "increased by"
+        elif delta < 0:
+            dir_str = "decreased by"
+        else:
+            dir_str = ""
+
+        abs_delta = abs(delta)
+        if abs_delta:
+            if value1:
+               delta_percent = float(abs_delta)/value1
+               percent_str = f" ({delta_percent:.1%})"
+            else:
+               #percent_str = " (bajillion%)"
+               percent_str = " (NaN%)"
+        else:
+            precent_str = ""
+
+        # assume we can show direction
+        if delta:
+            baseline_value = value1
+            if dur_thresh_percent:
+                threshold_delta = int((baseline_value * dur_thresh_percent) / 100)
+                threshold_low = max(baseline_value - threshold_delta, 0)
+                threshold_high = baseline_value + threshold_delta
+            else:
+                threshold_delta = duration_threshold
+                threshold_low = max(baseline_value - threshold_delta, 0)
+                threshold_high = baseline_value + threshold_delta
+
+            # if thresholds are specified, check for witholding output
+            if have_threshold and (value2 > threshold_low and value2 < threshold_high):
+                show_data = False
+
+        # any delta under 3 microseconds is noise, IMNSHO
+        if have_threshold and abs_delta < 3:
+            show_data = False
+
+        if show_data:
+            print(f"{item} 1 {bd1_type} = {value1}")
+            print(f"{item} 2 {bd2_type} = {value2}")
+            if dir_str:
+                print(f"  {item} {dir_str} {abs_delta} usecs{percent_str}")
+
+    sys.exit(0)
+
+
+def do_top(file1, item_type, options):
+    global duration_threshold
+    global dur_thresh_percent
+    global max_count
+    global have_threshold
+
+    bd = boot_data_parser.parse_boot_data(None, file1)
+
+    if dur_thresh_percent:
+        error_out("Invalid option (-p). Threshold percent doesn't make sense for 'top'.")
+
+    if item_type == "initcall":
+        tuples = list(bd.initcalls.items())
+    elif item_type == "region":
+        tuples = list(bd.regions.items())
+    elif item_type == "systemd":
+        tuples = list(bd.systemd_items.items())
+    elif item_type == None:
+        # do them all
+        tuples = list(bd.initcalls.items()) \
+                    + list(bd.regions.items()) \
+                    + list(bd.systemd_items.items())
+    else:
+        error_out("Invalid item_type '%s' in do_top()" % item_type)
+
+    if have_threshold:
+        filtered_tuples = [t for t in tuples if t[1] >= duration_threshold]
+        tuples = filtered_tuples
+
+    # sort by duration (which is tuple[1])
+    from operator import itemgetter
+
+    items = sorted(tuples, key=itemgetter(1), reverse=True)
+
+    items = items[:max_count]
+
+    for item, value in items:
+        print(f"{item:40} = {value:8} usecs")
+
+    sys.exit(0)
+
 
 def do_diff(file1, file2, options):
     print("FIXTHIS - Need to implement 'diff' command")
 
-def do_top(file1, options):
-    print("FIXTHIS - Need to implement 'top' command")
-
 def main():
     global debug
     global verbose
+    global duration_threshold
+    global max_count
+    global dur_thresh_percent
+    global have_threshold
 
     # allow error-free piping to other command line utilities (like 'head')
     signal(SIGPIPE, SIG_DFL)
@@ -199,6 +385,10 @@ def main():
     # parse command line arguments
     file1 = None
     file2 = None
+    item_type = None
+    # default threshold to 10ms
+    duration_threshold = 10000
+    max_count = 10
 
     if "-h" in sys.argv or "--help" in sys.argv:
         usage()
@@ -224,10 +414,44 @@ def main():
     if get_boolean_opt('compare'):
         cmd = "compare"
 
+    if get_boolean_opt('top'):
+        cmd = "top"
+
     if "-f" in sys.argv:
         file2 = get_opt_with_arg('-f')
         if not os.path.isfile(file2):
             error_out("'%s' is not a regular file" % file2)
+
+    allowed_item_types = ["meta", "initcall", "region", "systemd", "config"]
+    if "-t" in sys.argv:
+        item_type = get_opt_with_arg('-t')
+        if item_type not in allowed_item_types:
+            error_out("Invalid item type. Please use one of the following: %s" % allowed_item_types)
+
+    if "-d" in sys.argv:
+        dur_str = get_opt_with_arg('-d')
+        try:
+            duration_threshold = int(dur_str)
+        except ValueError:
+            error_out("Invalid duration. Please specify an integer")
+        dur_thresh_percent = 0
+        have_threshold = True
+
+    if "-c" in sys.argv:
+        count_str  = get_opt_with_arg('-c')
+        try:
+            max_count = int(count_str)
+        except ValueError:
+            error_out("Invalid count. Please specify an integer")
+
+    if "-p" in sys.argv:
+        dur_str = get_opt_with_arg('-p')
+        try:
+            dur_thresh_percent = int(dur_str)
+        except ValueError:
+            error_out("Invalid duration. Please specify an integer")
+        duration_threshold = 0
+        have_threshold = True
 
     # done with general parsable args...
     # first non-arg should be the boot data file
@@ -249,16 +473,20 @@ def main():
 
     # done parsing command line
     if cmd == "list":
-        do_list(file1)
+        do_list(file1, item_type)
 
     if cmd == "show":
         do_show(file1, options)
 
+    if cmd == "top":
+        do_top(file1, item_type, options)
+
     if cmd == "compare":
         do_compare(file1, file2, options)
 
-    if cmd == "compare":
+    if cmd == "diff":
         do_diff(file1, file2, options)
+
 
     error_out("Unrecognized command '%s'" % cmd)
 
