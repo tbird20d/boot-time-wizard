@@ -12,12 +12,15 @@
 # etc. can be correlated with the duration of specific boot operations
 #
 # Changelog:
+#  Version 1.5 - add timestamp to GBD section, move systemd section higher
+#                handle missing 'sudo'
+#  Version 1.4 - add systemd info section
 #  Version 1.3 - don't use ps -A on systems where -A is not supported
 #  Version 1.2 - replace - with _ in lab name
 #  Version 1.1 - fix shellcheck issues, change SKIP_ vars to DO_ vars
 #  Version 1.0 - first release
 
-VERSION="1.3"
+VERSION="1.5"
 
 # for testing
 #UPLOAD_URL="http://localhost:8000/cgi-bin/tbwiki.cgi/Boot_Data?action=do_upload"
@@ -68,9 +71,7 @@ Options:
 HERE
 }
 
-timestamp() {
-date +"%y%m%d-%H%M%S"
-}
+TIMESTAMP_STR=$(date +"%y%m%d-%H%M%S")
 
 OUTPUT_DIR=.
 
@@ -138,7 +139,7 @@ while [ -n "$1" ] ; do
     esac
 done
 
-OUTFILE="boot-data-${LAB}-${MACHINE}-$(timestamp).txt"
+OUTFILE="boot-data-${LAB}-${MACHINE}-${TIMESTAMP_STR}.txt"
 OUTPATH="${OUTPUT_DIR}/${OUTFILE}"
 
 # do some error checking
@@ -249,6 +250,9 @@ if [ -n "$DO_GRAB" ] ; then
     echo "== GRAB-BOOT-DATA INFO ==" >>"$OUTPATH"
     echo "GBD_ARGS=\"$SAVE_ARGS\"" >>"$OUTPATH"
     echo "GBD_VERSION=\"$VERSION\"" >>"$OUTPATH"
+    echo "GBD_TIMESTAMP=\"$TIMESTAMP_STR\"" >>"$OUTPATH"
+    echo "GBD_LAB=\"$LAB\"" >>"$OUTPATH"
+    echo "GBD_MACHINE=\"$MACHINE\"" >>"$OUTPATH"
     echo >>"$OUTPATH"
 
     echo "== Kernel Info ==" >>"$OUTPATH"
@@ -265,15 +269,27 @@ if [ -n "$DO_GRAB" ] ; then
     #out_section INTERRUPTS "cat /proc/interrupts"
     out_section CORES "cat /proc/cpuinfo"
     out_section CONFIG "get_config"
-    out_section "KERNEL MESSAGES" "sudo dmesg"
+
+    echo "== SYSTEMD INFO ==" >>"$OUTPATH"
+    if [ -x /usr/bin/systemd-analyze ] ; then
+        systemd-analyze >> "$OUTPATH"
+        echo ----- >>"$OUTPATH"
+        systemd-analyze blame >>"$OUTPATH"
+    else
+        echo "NOTE: systemd-analyze is not present on this system" >> "$OUTPATH"
+    fi
+
+    if [ -x /usr/bin/sudo ] ; then
+        out_section "KERNEL MESSAGES" "sudo dmesg"
+    else
+        out_section "KERNEL MESSAGES" "dmesg"
+    fi
 
     echo >>"$OUTPATH"
 
     echo "Boot data is in the file: $OUTPATH"
     UPLOAD_FILE="${OUTPATH}"
 fi
-
-# should I also get a systemd-analyze here?
 
 ### upload the data
 if [ -n "$DO_UPLOAD" ] ; then
