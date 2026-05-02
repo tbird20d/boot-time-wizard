@@ -75,6 +75,9 @@ Options:
  -h, --help    Show this usage help
  -f <file>     Use this option to specify a second file for comparison
                commands to operate on
+ -m <str>      Instead of specifying filenames, try to find a baseline
+               find (and results file) that match the given string.
+               ex: -m run-386421
  -d <ms>       Specify a threshold for the 'top' command, in milliseconds.
                Durations over the specified threshold will be shown
  -c <count>    Specify the max number of items to show for the 'top' command.
@@ -84,6 +87,10 @@ Options:
                (e.g. for 10, only show values 10% different from baseline value)
  -v            Show verbose output
  --debug       Show debug information
+
+Options for 'diff' command:
+ -l            List the sections that can be diff'ed
+ -s <section>  Specify an individual section (or data element) to diff
 """)
     sys.exit(0)
 
@@ -658,15 +665,15 @@ def diff_mem(bd1, bd2, desc1, desc2):
     output = ""
     change_count = 0
     for item in items:
-        value1 = bd1.get_meta(item)
-        value2 = bd1.get_meta(item)
+        value1 = int(bd1.get_meta(item))
+        value2 = int(bd2.get_meta(item))
         if value1 != value2:
             change_count += 1
             output += f"-{item}={value1}\n"
             output += f"+{item}={value2}\n"
             delta = value2 - value1
             dir_str = get_dir_str(delta, "K")
-            output += f"  {item} {dir_str}"
+            output += f"  {item} {dir_str}\n"
 
 
     if change_count == 0:
@@ -950,6 +957,15 @@ def do_diff(file1, file2, options):
     if "-s" in options:
         req_section  = get_opt_with_arg('-s')
 
+    if "-l" in options:
+        sections = list(section_prefs.keys())
+        sections.sort()
+        print("Here are the sections you can use with 'diff':")
+        for section in sections:
+              print("  " + section)
+        sys.exit(0)
+
+
     # outline:
     #  parse requested section
     #  validate requested section
@@ -997,6 +1013,36 @@ def do_diff(file1, file2, options):
 
     sys.exit(0)
 
+# find baseline and results files that match the indicated string
+# string can contain a directory (ex: /tmp/bttw-dir/run-123456)
+# if no directory specified, then just match the string.
+# NOTE- string must be long enough to uniquely match one and only
+# one baseline filename and one results filename.
+def get_matching_files(file_match_str):
+    baseline_path = None
+    results_path = None
+
+    scan_dir = os.path.dirname(file_match_str)
+    if not scan_dir:
+        scan_dir = "."
+
+    match_expr = os.path.basename(file_match_str)
+
+    for candidate in os.listdir(scan_dir):
+        if match_expr in candidate:
+            if "baseline" in candidate:
+                if not baseline_path:
+                    baseline_path = scan_dir + "/" + candidate
+                else:
+                    error_out("Multiple files match '%s" % file_match_str)
+            if "results" in candidate:
+                if not results_path:
+                    results_path = scan_dir + "/" + candidate
+                else:
+                    error_out("Multiple files match '%s" % file_match_str)
+
+    return baseline_path, results_path
+
 def main():
     global debug
     global verbose
@@ -1015,6 +1061,7 @@ def main():
     # default threshold to 10ms
     duration_threshold = 10000
     max_count = 10
+    file_match_str = ""
 
     if "-h" in sys.argv or "--help" in sys.argv:
         usage()
@@ -1070,6 +1117,9 @@ def main():
         except ValueError:
             error_out("Invalid count. Please specify an integer")
 
+    if "-m" in sys.argv:
+        file_match_str  = get_opt_with_arg('-m')
+
     if "-p" in sys.argv:
         dur_str = get_opt_with_arg('-p')
         try:
@@ -1079,14 +1129,20 @@ def main():
         duration_threshold = 0
         have_threshold = True
 
+
+    if file_match_str:
+        # look for 'baseline' and 'results' files matching this string:
+        file1, file2 = get_matching_files(file_match_str)
+
     # done with general parsable args...
     # first non-arg should be the boot data file
-    try:
-        file1 = sys.argv[1]
-        sys.argv.remove(file1)
-    except IndexError:
-        if cmd != "list":
-            error_out("Missing boot-data file argument (use -h for help)")
+    if not file1:
+        try:
+            file1 = sys.argv[1]
+            sys.argv.remove(file1)
+        except IndexError:
+            if cmd != "list":
+                error_out("Missing boot-data file argument (use -h for help)")
 
     # sanity check some args
     if file1 and not os.path.isfile(file1):
