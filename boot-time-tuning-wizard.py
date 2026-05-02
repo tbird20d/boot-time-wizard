@@ -10,7 +10,7 @@
 # - handle different optimization methods:
 #   - change command line setting
 #     - add deferred initcalls
-#   - remove bt entries
+#   - remove devicetree entries
 #   - remove udev entries
 #   - remove SELinux rules
 # - during test, check that system still behaves properly
@@ -25,9 +25,10 @@
 #
 # overall flow:
 #  for a given item:
-#    instrument, build, boot, measure, check functionality
-#    alter, build, boot, measure, check functionality
-#    compare results, restore (build, boot, check)
+#    baseline: instrument, build, boot, measure, check functionality
+#    test: alter, build, boot, measure, check functionality
+#    analyze: compare results, make recommendations
+#    recover: de-instrument, restore (build, boot, check)
 #
 # Notes:
 # - use instrumentation to determine if a kernel feature is used or not,
@@ -153,7 +154,9 @@ class opt_method_class():
         self.name = name
         self.description = description
         self.opt_type = opt_type
-        self.results_txt = "\n##########\n"
+        self.results_txt = "#"*70  + "\n" + \
+            "=== Results report for optimization method '%s' ===\n" % name
+        self.compare_list = ["time_to_init"]
 
     def save_baseline(self, arg):
         raise NotImplementedError
@@ -180,6 +183,10 @@ class opt_method_class():
     def show_results(self):
         print(self.results_txt)
 
+
+    def get_compare_list(self):
+        # return method-specific items to compare in a report
+        return self.compare_list
 
 # the optimization method class for config items
 class config_om_class(opt_method_class):
@@ -636,6 +643,11 @@ Options:
  -v            Show verbose output.  When used with -l and -t, shows
                the status of each optimization method on the given target.
  --debug       Show debug information
+ -r <run_id>   Generate a report from boot-data files from the indicated
+               run_id.  Other parameters, such as -m, -t and -k must be
+               the same as the original run.  The program must be run from
+               the same directory as it was originally. This is primarily
+               used to test the report generator, on a single method.
 """)
     sys.exit(0)
 
@@ -650,12 +662,15 @@ def init_methods(kernel_dir):
     # reconfiguring the kernel
     if kernel_dir:
         m = config_om_class("disable_bluetooth", "Disable bluetooth by compiling kernel without it.", "CONFIG_BT", "N")
+        m.compare_list = ["CONFIG_BT", "bt_init", "bluetooth.service"]
         methods[m.name] = m
 
         m = config_om_class("disable_sound", "Disable sound by compiling kernel without it.", "CONFIG_SOUND", "N")
+        m.compare_list = ["CONFIG_SOUND", "alsa_pcm_init", "alsa_sound_init", "alsa_timer_init", "init_soundcore", "systemd-modules-load.service"]
         methods[m.name] = m
 
         m = config_om_class("disable_graphics", "Disable graphics by compiling kernel without it.", "CONFIG_DRM", "N")
+        m.compare_list = ["CONFIG_DRM"]
         methods[m.name] = m
 
     dprint("== Methods ==")
@@ -778,13 +793,11 @@ def try_one_method(method, target, artifact_dir):
 
     dprint("#######################################################")
     vprint("== Comparing baseline with optimization results")
+
     # generate report
-    # FIXTHIS - diff is crude, need a compare function
-    cmd = "diff -u %s %s" % (local_baseline_path,
-                          local_results_path)
-    status, output = getstatusoutput(cmd)
-    #print(output)
-    method.set_results(output)
+    report_data = gen_report_data(method, local_baseline_path, local_results_path)
+
+    method.set_results(report_data)
 
     print("== Done with method %s" % method.name)
     return output
@@ -815,26 +828,34 @@ def tune_boot_time(methods, target, artifact_dir):
 def report_header(run_id, tname, saved_args):
     global VERSION
 
+    arg_str = " ".join(saved_args)
+
     from datetime import datetime
 
     now = datetime.now()
     time_str = now.strftime("%Y-%02m-%02d_%02H:%02M:%02S")
     header = """Boot-Time Tuning Wizard Report
 ==========================================
-DATE_AND_TIME=%s
-RUN_ID=%s
-TARGET_NAME=%s
-BTTW_ARGS='%s'
-BTTW_VERSION=%s.%s.%s
+DATE_AND_TIME="%s"
+RUN_ID="%s"
+TARGET_NAME="%s"
+BTTW_ARGS="%s"
+BTTW_VERSION="%s.%s.%s"
 ==========================================
-""" % (time_str, run_id, tname, saved_args, \
-       VERSION[0], VERSION[1], VERSION[2])
+""" % (time_str, run_id, tname, arg_str, VERSION[0], VERSION[1], VERSION[2])
 
     return header
 
-def log_to_report(artifact_dir, msg):
+def log_to_report(artifact_dir, msg, append=True):
+    global run_prefix
+
     report_path = artifact_dir + "/" + run_prefix + "report.txt"
-    with open(report_path, "a") as report_file:
+    if append:
+        mode = "a"
+    else:
+        mode = "w"
+
+    with open(report_path, mode) as report_file:
         report_file.write(msg)
 
 def get_opt_with_arg(arg):
@@ -878,6 +899,90 @@ def find_gbd_script_path(script_dir):
 
     error_out("Can't find grab-boot-data.sh on system!")
 
+def gen_report_data(method, baseline_path, results_path):
+    report_data = "#"*70  + "\n" + \
+        "=== Results report for optimization method '%s' ===\n" % method.name
+
+    # compare a few summary items:
+    base_compare_list = ["time_to_init", "SYSTEMD_KERNEL_USECS", "SYSTEMD_USERSPACE_USECS"]
+
+    compare_list = base_compare_list + method.get_compare_list()
+
+    # Then compare some method-specific items:
+    header = "-- Individual item comparisons --\n"
+    # make a list of items to compare
+    compare_str = " ".join(compare_list)
+
+    cmd = "boot-data compare %s -f %s %s" % (baseline_path, results_path,
+                                          compare_str)
+    status, output = getstatusoutput(cmd)
+
+    report_data += header + output + "\n\n"
+
+    header = "-- Boot-data diff of baseline and results --\n"
+    cmd = "boot-data diff %s -f %s" % (baseline_path, results_path)
+    status, output = getstatusoutput(cmd)
+    report_data += header + output + "\n\n"
+
+    # FIXTHIS - raw diff is crude, let's omit for now
+    #header = "-- Raw diff of baseline and results --\n"
+    #cmd = "diff -u %s %s" % (baseline_path, results_path)
+    #status, output = getstatusoutput(cmd)
+    #report_data += header + output
+
+    return report_data
+
+# generate a report from existing run artifacts
+def generate_report(report_run_id, method, target, artifact_dir, saved_args):
+    global run_prefix
+
+    if report_run_id.startswith("run-"):
+        report_run_id = report_run_id[4:]
+    if len(report_run_id) != 6:
+        error_out("Invalid run-id.  It must be a 6-digit number.")
+
+    run_prefix = "run-%s-" % report_run_id
+
+    report_path = artifact_dir + "/" + run_prefix + "report.txt"
+
+    if os.path.exists(report_path):
+        print("Report '%s' already exists" % report_path)
+        response = input("OK to overwrite? [Y/n] ")
+        if not response == "Y":
+            print("Report Generation cancelled!")
+            sys.exit(0)
+
+    # find file paths
+    candidates = os.listdir(artifact_dir)
+    baseline_prefix = run_prefix + "baseline"
+    results_prefix = run_prefix + "results"
+    baseline_path = ""
+    results_path = ""
+    for candidate in candidates:
+        if candidate.startswith(baseline_prefix):
+            baseline_path = artifact_dir + "/" + candidate
+        if candidate.startswith(results_prefix):
+            results_path = artifact_dir + "/" + candidate
+
+    if not baseline_path:
+        error_out("Cannot find baseline boot-data file. Possible invalid run-id '%s'" % report_run_id)
+    if not results_path:
+        error_out("Cannot find results boot-data file. Possible invalid run-id '%s'" % report_run_id)
+
+    # clean up saved_args - remove '-r <run-id>'
+    arg_pos = saved_args.index("-r")
+    del saved_args[arg_pos + 1]
+    del saved_args[arg_pos]
+
+    rheader = report_header(run_prefix[:-1], target.name, saved_args)
+    report_data = gen_report_data(method, baseline_path, results_path)
+
+    # False = do not append
+    log_to_report(artifact_dir, rheader + report_data, False)
+
+    print("Report data is in: '%s'" % report_path)
+    sys.exit(0)
+
 
 def main():
     global debug
@@ -885,6 +990,7 @@ def main():
     global run_prefix, kernel_id
 
     saved_args = sys.argv[1:]
+
     script_dir = os.path.dirname(sys.argv[0])
 
     # allow error-free piping to other command line utilities (like 'head')
@@ -898,6 +1004,7 @@ def main():
     artifact_dir_created = False
     kernel_dir = ""
     do_list = False
+    do_gen_report = False
 
     if "-h" in sys.argv or "--help" in sys.argv:
         usage()
@@ -929,6 +1036,10 @@ def main():
 
     if "-m" in sys.argv:
         method_name = get_opt_with_arg('-m')
+
+    if "-r" in sys.argv:
+        report_run_id = get_opt_with_arg('-r')
+        do_gen_report = True
 
     # done parsing command line
     # do more initialization
@@ -985,6 +1096,11 @@ def main():
     kernel_id = "%06d-%d" % (rnd, run_count)
     dprint(f"{run_prefix=}, {kernel_id=}")
 
+    # generate report from results files, without running a test
+    if do_gen_report:
+        print(f"{saved_args=}")
+        generate_report(report_run_id, method, target, artifact_dir, saved_args)
+
     if method:
         method.save_baseline(target)
 
@@ -994,11 +1110,12 @@ def main():
         method.restore_baseline(target)
         method.undo_optimization(target)
 
-        method.show_results()
-
         # save results to a report file
-        header = report_header(run_prefix[:-1], target.name, saved_args)
-        log_to_report(artifact_dir, header + method.results_txt)
+        rheader = report_header(run_prefix[:-1], target.name, saved_args)
+        log_to_report(artifact_dir, rheader + method.results_txt)
+
+        #method.show_results()
+        print("Results are in the report file")
     else:
         tune_boot_time(methods, target, artifact_dir)
 
