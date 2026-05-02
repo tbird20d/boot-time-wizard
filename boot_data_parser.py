@@ -174,6 +174,12 @@ class boot_data_class:
                 print("in available_metas: %s not in self.__dict__" % name)
         return metas
 
+    def get_sections(self):
+        return list(self.section_blocks.keys())
+
+    def get_section_block(self, section):
+        return self.section_blocks.get(section, "**NO DATA**")
+
     def available_items(self, include_configs = True):
         initcalls = list(self.initcalls.keys())
         regions = list(self.regions.keys())
@@ -225,6 +231,7 @@ def parse_initcall_line(req, line):
         return (None, None)
     return (initcall, duration)
 
+# returns a float
 def line_time_to_time(line):
     time_str, rest = line.split("]", 1)
     if not time_str.startswith("["):
@@ -232,7 +239,7 @@ def line_time_to_time(line):
     else:
         return float(time_str[1:])
 
-def line_time_to_microsecs(line):
+def line_time_to_usecs(line):
     return int(line_time_to_time(line) * 1000000)
 
 def parse_GBD_info(req, bd, block):
@@ -379,11 +386,11 @@ def parse_systemd_info(req, bd, block):
                 kern_usecs = int(float(g[0][:-1]) * 1000000)
                 user_usecs = int(float(g[1][:-1]) * 1000000)
                 full_usecs = int(float(g[2][:-1]) * 1000000)
-                bd.SYSTEMD_KERNEL_USECS = kern_usecs
+                #bd.SYSTEMD_KERNEL_USECS = kern_usecs
+                #bd.SYSTEMD_USERSPACE_USECS = user_usecs
+                #bd.SYSTEMD_FULL_START_USECS = full_usecs
                 bd.systemd_items["SYSTEMD_KERNEL_USECS"] = kern_usecs
-                bd.SYSTEMD_USERSPACE_USECS = user_usecs
                 bd.systemd_items["SYSTEMD_USERSPACE_USECS"] = user_usecs
-                bd.SYSTEMD_FULL_START_USECS = full_usecs
                 bd.systemd_items["SYSTEMD_FULL_START_USECS"] = full_usecs
 
             else:
@@ -430,7 +437,7 @@ def record_region(req, bd, line_no, line):
     # try to match printk to a region start or end
     for reg_str, reg_name, source_file, delim_type in reg_marker_printks:
         if reg_str in line:
-            line_time = line_time_to_microsecs(line)
+            line_time = line_time_to_usecs(line)
             if delim_type == "start":
                 if reg_name in bd.reg_stack:
                     # save error if region is already started
@@ -481,7 +488,7 @@ def record_region(req, bd, line_no, line):
     for reg_name in rs_keys:
         start_time, end_type, start_line_no, start_line = bd.reg_stack[reg_name]
         if end_type == "any":
-            line_time = line_time_to_microsecs(line)
+            line_time = line_time_to_usecs(line)
             duration = line_time - start_time
             del bd.reg_stack[reg_name]
 
@@ -511,7 +518,7 @@ def parse_boot_data(req, filepath):
     #    foo = bd * 5
 
     fd = open(filepath, "r")
-    sections = {}
+    bd.section_blocks = {}
     section = ""
     block = []
 
@@ -521,7 +528,7 @@ def parse_boot_data(req, filepath):
         # handle section switches
         if line.startswith("== "):
             if section:
-                sections[section] = block
+                bd.section_blocks[section] = block
 
             # wrap up last section
             if section == "Kernel Info":
@@ -548,54 +555,64 @@ def parse_boot_data(req, filepath):
             block = []
             continue
         else:
-            if section == "CONFIG":
-                line = line.strip()
-                # skip blank and comment lines
-                if not line:
-                    continue
-                if line.startswith("#") and not line.endswith(" is not set"):
-                    continue
-                if line.startswith("CONFIG_"):
-                    name, value = line[7:].split("=", 1)
-                    bd.CONFIGS[name] = value
-                elif line.endswith(" is not set"):
-                    name = line[9:].split(" ")[0]
-                    bd.CONFIGS[name] = "n"
-                else:
-                    req.debug_log("weirdness in config for line: '%s'" % line)
-
             block.append(line.strip())
 
-        # "KERNEL_MESSAGES" section - parse directly in this section
-        if "initcall " in line and "returned " in line:
-            #req.debug_log("line=%s" % line)
-            (initcall, duration) = parse_initcall_line(req, line)
-            if not initcall:
-                req.debug_log("problem parsing initcall")
+        # parse config and kernel messages directly in this loop
+        # don't wait and accumulate a block, then parse that
+        # that would require looping over these lines twice
+        if section == "CONFIG":
+            line = line.strip()
+            # skip blank and comment lines
+            if not line:
+                continue
+            if line.startswith("#") and not line.endswith(" is not set"):
+                continue
+            if line.startswith("CONFIG_"):
+                name, value = line[7:].split("=", 1)
+                bd.CONFIGS[name] = value
+            elif line.endswith(" is not set"):
+                name = line[9:].split(" ")[0]
+                bd.CONFIGS[name] = "n"
             else:
-                bd.initcalls[initcall] = duration
-            continue
+                req.debug_log("weirdness in config for line: '%s'" % line)
 
-        if "Machine model:" in line:
-            junk, machine = line.split("Machine model:",1)
-            bd.MACHINE = machine.strip()
+        if section == "KERNEL MESSAGES":
+            # "KERNEL_MESSAGES" section - parse directly in this section
+            if "initcall " in line and "returned " in line:
+                #req.debug_log("line=%s" % line)
+                (initcall, duration) = parse_initcall_line(req, line)
+                if not initcall:
+                    req.debug_log("problem parsing initcall")
+                else:
+                    bd.initcalls[initcall] = duration
+                continue
 
-        if "Run /init as init process" in line:
-            time = line_time_to_time(line)
-            bd.time_to_init = time
+            if "Machine model:" in line:
+                junk, machine = line.split("Machine model:",1)
+                bd.MACHINE = machine.strip()
 
-        if "Run /sbin/init as init process" in line:
-            time = line_time_to_time(line)
-            bd.time_to_init = time
+            if "Run /init as init process" in line:
+                time_usecs = line_time_to_usecs(line)
+                bd.time_to_init = time_usecs
 
-        # do region detection in the printks
-        if line.startswith("["):
-            # FIXTHIS - could ignore lines with 0.000000 timestamps here?
-            req.debug_log("%d: %s" % (line_no, line.strip()))
-            record_region(req, bd, line_no, line.strip())
-            req.debug_log("   regions = '%s'" % bd.regions)
-            req.debug_log("   reg_stack = '%s'" % bd.reg_stack)
-            req.debug_log("   reg_list = '%s'" % bd.reg_list)
+            if "Run /sbin/init as init process" in line:
+                time_usecs = line_time_to_usecs(line)
+                bd.time_to_init = time_usecs
+
+            # do region detection in the printks
+            if line.startswith("["):
+                # FIXTHIS - could ignore lines with 0.000000 timestamps here?
+                req.debug_log("%d: %s" % (line_no, line.strip()))
+                record_region(req, bd, line_no, line.strip())
+                req.debug_log("   regions = '%s'" % bd.regions)
+                req.debug_log("   reg_stack = '%s'" % bd.reg_stack)
+                req.debug_log("   reg_list = '%s'" % bd.reg_list)
+
+    # previous version of grab-boot-data.sh did not put and END section marker
+    # this causes us to miss adding the last block to the section_blocks map
+    if section != "END":
+        bd.section_blocks[section] = block
+
 
     req.debug_log("regions = '%s'" % bd.regions)
 
