@@ -286,6 +286,8 @@ if [ -n "$DO_GRAB" ] ; then
     fi
 
     echo >>"$OUTPATH"
+    # close the last section
+    echo "== END ==" >>"$OUTPATH"
 
     echo "Boot data is in the file: $OUTPATH"
     UPLOAD_FILE="${OUTPATH}"
