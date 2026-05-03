@@ -689,10 +689,12 @@ def diff_ext(bd1, bd2, desc1, desc2, sec_name, ext_tool="diff -u"):
 
     lines1, lines2 = get_lines_1_2(bd1, bd2, sec_name)
     if lines1 == "**NO DATA**":
-        error_out("Missing block data for section '%s' in %s file" % (sec_name, desc1))
+        msg = "Missing block data for section '%s' in %s file" % (sec_name, desc1)
+        return msg
 
     if lines2 == "**NO DATA**":
-        error_out("Missing block data for section '%s' in %s file" % (sec_name, desc2))
+        msg = "Missing block data for section '%s' in %s file" % (sec_name, desc2)
+        return msg
 
     # write each block to a file, then process the files with the ext_tool
     block1 = "\n".join(lines1)
