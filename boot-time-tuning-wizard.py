@@ -1,4 +1,7 @@
 #!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+# vim: set ts=4 sw=4 et :
+#
 # boot-time-tuning-wizard.py
 #   Run a series of measurements and tests, to try to optimize boot-time
 #     for a platform
@@ -9,6 +12,7 @@
 # - detect build failures
 # - handle different optimization methods:
 #   - change command line setting
+#     - add low_mem
 #     - add deferred initcalls
 #   - remove devicetree entries
 #   - remove udev entries
@@ -158,6 +162,10 @@ class opt_method_class():
             "=== Results report for optimization method '%s' ===\n" % name
         self.compare_list = ["time_to_init"]
 
+        # artifact_prefix gets set later
+        # set to something that will raise exception if used in string context
+        self.artifact_prefix = 999
+
     def save_baseline(self, arg):
         raise NotImplementedError
 
@@ -182,7 +190,6 @@ class opt_method_class():
 
     def show_results(self):
         print(self.results_txt)
-
 
     def get_compare_list(self):
         # return method-specific items to compare in a report
@@ -216,16 +223,14 @@ class config_om_class(opt_method_class):
         # report whether this optimization is already applied
         # check config, return a string
         configs = target.get_target_configs()
-        # note: configs has short names
-        dprint("in detect_optimization: Value of %s is '%s'" % (self.config_name, configs.get(self.config_name, "Missing")))
-        for config in configs:
-            dprint("config %s=%s" % (config, configs[config]))
-        dprint("self.config_name=%s" % self.config_name)
+
         if self.config_name not in configs:
             return (False, "config %s not found")
-        if configs[self.config_name] != self.config_value:
+
+        if configs[self.config_name] == self.config_value:
+            return (True, "config %s has the value %s" % self.config_name, self.config_value)
+        else:
             return (False, "config %s: current value of %s does not match desired value of %s" % (self.config_name, configs[self.config_name], self.config_value))
-        return (True, "config %s has the value %s" % self.config_name, self.config_value)
 
     def apply_optimization(self, target, kernel_id):
         target.change_to_src_dir()
@@ -238,8 +243,7 @@ class config_om_class(opt_method_class):
 
         old_build_value = target.get_build_config(self.config_name)
 
-        # FIXTHIS - TRB remove or change to dprint after debugging
-        print("TRB: old_value=%s, new_value=%s, old_build_value=%s" % (old_value, new_value, old_build_value))
+        dprint("config: old_build_value=%s, old_value=%s, new_value=%s" % (old_build_value, old_value, new_value))
         # compare config in source with config
         if old_value == new_value:
             wprint("in apply_optimization, old config value matches requested config value")
@@ -297,110 +301,53 @@ class config_om_class(opt_method_class):
 
 # the optimization method class for kernel command line options
 class cmdline_om_class(opt_method_class):
-    def __init__(self, name, description, cmd_name, cmd_value):
+    def __init__(self, name, description, option_str):
         super().__init__(name, description, "kernel_cmdline")
-        self.cmd_name = cmd_name
-        self.cmd_value = cmd_value
-        self.kernel_cmdline_path = ""
+        self.option_str = option_str
+        if "=" in option_str:
+            self.option_name, self.option_value = option_str.split("=", 1)
+
 
     def save_baseline(self, target):
-        # FIXTHIS - save current kernel cmdline
-        error_out("save_baseline for cmdline_om_class is not finished!!")
+        # save the current (configured) target cmdline
+        status, cur_cmdline = target.ttc("get_cmdline")
+        saved_cmdline_path = self.artifact_prefix + "saved_cmdline.txt"
+        with open(saved_cmdline_path, "w") as fd:
+                  fd.write(cur_cmdline)
         return
 
     def restore_baseline(self, target):
-        error_out("restore_baseline for cmdline_om_class is not finished!!")
-        # FIXTHIS - restore original kernel cmdline
+        saved_cmdline_path = self.artifact_prefix + "saved_cmdline.txt"
+        cmdline = open(saved_cmdline_path, "r").read()
+        status, output = target.ttc("set_cmdline -r " + cmdline)
 
     def detect_optimization(self, target):
         # report whether this optimization is already applied
         # check config, return a string
-        # FIXTHIS -
-        return (False, "detect_optimization is not implemented for cmdline_om_class")
+        status, cmdline = target.ttc("get_cmdline -s")
 
-        # read the current cmdline
-        status, cmdline = target.run("cat /proc/cmdline")
+        if self.option_str in cmdline:
+            return (True, "cmdline option '%s' is already in current command line" % self.option_str)
 
-        # FIXTHIS split cmdline into cmds dictionary
-
-        # FIXTHIS - find the command, and check it's value with the desired value"
-        return (False, "cmdline %s: current value of %s does not match desired value of %s" % (self.cmd_name, cmds[self.cmd_name], self.cmd_value))
-
+        return (False, "Did not find '%s' in current command line" % self.option_str)
 
     def apply_optimization(self, target, kernel_id):
-        # only sure, platform-neutral, way to do this by writing
-        # to CONFIG_CMDLINE (but that requires CONFIG_CMDLINE_EXTEND
-        # or CONFIG_CMDLINE_FORCE, and not CONFIG_CMDLINE_FROM_BOOTLOADER)
-        target.change_to_src_dir()
+        print(" - Applying optimization: adding '%s' to command line" % self.option_str)
 
-        # read the current target cmdline
-        status, target_cmdline = target.run("cat /proc/cmdline")
+        status, cmdline = target.ttc("get_cmdline")
+        if status != 0:
+             eprint("Could not get current configured command line")
 
+        self.saved_cmdline = cmdline
 
-        # FIXTHIS - continue working from here (rest is copy-paste full of bugs)
-        error_out("apply_optimization for cmdline_om_class is not finished!!")
-
-        build_cmdline =configs.get("CONFIG_CMDLINE", "unknown")
-        new_value = self.cmd_value
-
-        old_build_value = target.get_build_config(self.config_name)
-
-        dprint("TRB: old_value=%s, new_value=%s, old_build_value=%s" % (old_value, new_value, old_build_value))
-
-        # FIXTHIS - split options into separate arguments
-        error_out("apply_optimization for cmdline_om_class is not finished!!")
-
-        # compare config in source with config
-        if old_value == new_value:
-            wprint("in apply_optimization, old config value matches requested config value")
-            wprint(" old_value=%s, new_value=%s, old_build_value=%s" % (old_value, new_value, old_build_value))
-
-        # set config to new value
-        print(" - Applying optimization: changing config value %s: %s -> %s" % (self.config_name, old_build_value, new_value))
-        target.set_build_config(self.config_name, new_value)
-
-        # TRB: wait for input (to investigate what happened)
-        #input("Press enter to continue...")
-
-        self.saved_value = old_build_value
-
-        # set kernel id
-        target.set_localversion(kernel_id)
-
-        # rebuild kernel
-        print(" - Rebuilding kernel...")
-        status, output = target.ttc("kbuild", verbose)
-
-        # install kernel
-        print(" - Installing kernel...")
-        status, output = target.ttc("kinstall", verbose)
-
-        # reset working dir to where we started
-        target.change_to_start_dir()
-
-        return status, output
+        # FIXTHIS - for now, assume option can be appended at the end
+        target.ttc("set_cmdline " + self.option_str)
+        return status
 
     def undo_optimization(self, target):
-        error_out("undo_optimization for cmdline_om_class is not finished!!")
-        target.change_to_src_dir()
-
-        # set config to saved value
-        target.set_build_config(self.config_name, self.saved_value)
-        print(" - Undoing optimization: changing config value %s=%s", self.config_name, self.saved_value)
-
-        # clear kernel id
-        target.clear_localversion()
-
-        # rebuild kernel
-        print(" - Rebuilding kernel...")
-        status, output = target.ttc("kbuild", verbose)
-
-        # install kernel
-        print(" - Installing kernel...")
-        status, output = target.ttc("kinstall", verbose)
-
-        # reset working dir to where we started
-        target.change_to_start_dir()
+        status, cmdline = target.ttc("set_cmdline -r" + self.saved_cmdline)
+        if status != 0:
+             eprint("Could not set current configured command line")
         return
 
 class target_class():
@@ -433,6 +380,8 @@ class target_class():
 
         self.CONFIGS = {}   # fill the CONFIGS dictionary in, as needed
         self.config_saved = False
+
+        self.artifact_prefix = 999
 
     # return the output from 'ttc target cmd'
     def ttc(self, cmd, echo=False):
@@ -566,22 +515,22 @@ class target_class():
 
         return value
 
-    def save_build_config(self):
+    def save_build_config(self, artifact_prefix):
         if not self.config_saved:
             # put original build configs into artifact dir
             config_path = self.KBUILD_OUTPUT + "/.config"
-            save_path = self.artifact_dir + "/" + run_prefix + "saved-config"
+            save_path = self.artifact_prefix + "saved-config"
             dprint("Saving build config: from %s to %s" % (config_path, save_path))
             shutil.copy(config_path, save_path)
             self.config_saved = True
 
-    def restore_build_config(self):
+    def restore_build_config(self, artifact_prefix):
         if not self.config_saved:
             eprint("Error restoring build config - original config was not saved!")
             return
 
         # copy original build configs back into build dir
-        save_path = self.artifact_dir + "/" + run_prefix + "saved-config"
+        save_path = self.artifact_prefix + "saved-config"
         config_path = self.KBUILD_OUTPUT + "/.config"
         dprint("Restoring build config: from %s to %s" % (save_path, config_path))
         shutil.copy(save_path, config_path)
@@ -673,6 +622,10 @@ def init_methods(kernel_dir):
         m.compare_list = ["CONFIG_DRM"]
         methods[m.name] = m
 
+        m = cmdline_om_class("low_mem", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
+        m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
+        methods[m.name] = m
+
     dprint("== Methods ==")
     dprint(methods)
 
@@ -712,8 +665,8 @@ def list_methods(methods, target):
     if not (verbose and target):
         print("\nNote: use -v and specify a target to see current status")
 
-def try_one_method(method, target, artifact_dir):
-    global run_prefix, kernel_id
+def try_one_method(method, target, artifact_prefix):
+    global kernel_id
     global gbd_script_path
 
     print("##################################################")
@@ -731,14 +684,14 @@ def try_one_method(method, target, artifact_dir):
         if "No such" in output:
             dest_dir = "/bin"
 
-    target.put(gbd_script_path, dest_dir)
     # FIXTHIS - should record dest_dir for later cleanup
-
-    vprint(" - Gathering baseline boot data...")
-    target.run("chmod a+x %s/grab-boot-data.sh" % dest_dir)
+    target.put(gbd_script_path, dest_dir)
 
     print("== Instrumenting target: %s, for method %s" % (target.name, method.name))
     method.instrument_target(target)
+
+    vprint(" - Gathering baseline boot data...")
+    target.run("chmod a+x %s/grab-boot-data.sh" % dest_dir)
 
     print("== Measuring baseline for target: %s" % target.name)
     # measure metric we are trying to optimize
@@ -758,7 +711,7 @@ def try_one_method(method, target, artifact_dir):
     # download and save boot data file
     dprint("#######################################################")
     vprint("== Retrieving baseline boot data from %s..." % baseline_results_path)
-    local_baseline_path = artifact_dir + "/" + run_prefix + baseline_file
+    local_baseline_path = artifact_prefix + baseline_file
     target.get(baseline_results_path, local_baseline_path)
 
     # apply method
@@ -788,7 +741,7 @@ def try_one_method(method, target, artifact_dir):
 
     # download and save boot data file
     vprint(" - Retrieving test results boot data from %s..." % results_file)
-    local_results_path = artifact_dir + "/" + run_prefix + results_file
+    local_results_path = artifact_prefix + results_file
     target.get(results_path, local_results_path)
 
     dprint("#######################################################")
@@ -802,26 +755,30 @@ def try_one_method(method, target, artifact_dir):
     print("== Done with method %s" % method.name)
     return output
 
-def tune_boot_time(methods, target, artifact_dir):
+def tune_boot_time(methods, target, artifact_prefix):
     global kernel_id
+
+    rnd_str = artifact_prefix[-7:-1]
 
     print("Start of boot-time tuning:")
 
     # run through all listed methods
-    # FIXTHIS - advance run_count
-    run_count = int(kernel_id.split("-")[-1]) + 1
-    kernel_id = "%06d-%d" % (rnd, run_count)
+    mlist = list(methods.keys())
+    for m in mlist:
+        # FIXTHIS - advance run_count
+        run_count = int(kernel_id.split("-")[-1]) + 1
+        kernel_id = "%s-%d" % (rnd_str, run_count)
 
-    # FIXTHIS - select a method
-    # try it
-    method.apply_optimization(target, kernel_id)
+        # FIXTHIS - select a method
+        # try it
+        m.apply_optimization(target, kernel_id)
 
-    # reset and try again
-    dprint("#######################################################")
-    dprint("== Undo Optimization ==")
-    method.undo_optimization(target)
+        # reset and try again
+        dprint("#######################################################")
+        dprint("== Undo Optimization ==")
+        m.undo_optimization(target)
 
-    # FIXTHIS - decide if optimization was worth it
+        # FIXTHIS - decide if optimization was worth it
 
     print("Final tuning recommendations:...")
 
@@ -846,10 +803,8 @@ BTTW_VERSION="%s.%s.%s"
 
     return header
 
-def log_to_report(artifact_dir, msg, append=True):
-    global run_prefix
-
-    report_path = artifact_dir + "/" + run_prefix + "report.txt"
+def log_to_report(artifact_prefix, msg, append=True):
+    report_path = artifact_prefix + "report.txt"
     if append:
         mode = "a"
     else:
@@ -938,12 +893,14 @@ def generate_report(report_run_id, method, target, artifact_dir, saved_args):
 
     if report_run_id.startswith("run-"):
         report_run_id = report_run_id[4:]
+
     if len(report_run_id) != 6:
         error_out("Invalid run-id.  It must be a 6-digit number.")
 
     run_prefix = "run-%s-" % report_run_id
+    artifact_prefix = artifact_dir + "/" + run_prefix
 
-    report_path = artifact_dir + "/" + run_prefix + "report.txt"
+    report_path = artifact_prefix + "report.txt"
 
     if os.path.exists(report_path):
         print("Report '%s' already exists" % report_path)
@@ -978,7 +935,7 @@ def generate_report(report_run_id, method, target, artifact_dir, saved_args):
     report_data = gen_report_data(method, baseline_path, results_path)
 
     # False = do not append
-    log_to_report(artifact_dir, rheader + report_data, False)
+    log_to_report(artifact_prefix, rheader + report_data, False)
 
     print("Report data is in: '%s'" % report_path)
     sys.exit(0)
@@ -1080,7 +1037,6 @@ def main():
 
     # make artifact_dir absolute
     artifact_dir = os.path.abspath(artifact_dir)
-
     if target:
         target.artifact_dir = artifact_dir
 
@@ -1094,7 +1050,9 @@ def main():
     run_prefix = "run-%06d-" % rnd
     run_count = 1
     kernel_id = "%06d-%d" % (rnd, run_count)
-    dprint(f"{run_prefix=}, {kernel_id=}")
+    artifact_prefix = artifact_dir + "/" + run_prefix
+    dprint(f"{artifact_prefix=}")
+    target.artifact_prefix = artifact_prefix
 
     # generate report from results files, without running a test
     if do_gen_report:
@@ -1102,9 +1060,10 @@ def main():
         generate_report(report_run_id, method, target, artifact_dir, saved_args)
 
     if method:
+        method.artifact_prefix = artifact_prefix
         method.save_baseline(target)
 
-        try_one_method(method, target, artifact_dir)
+        try_one_method(method, target, artifact_prefix)
 
         # reset opt. status when not accumulating them
         method.restore_baseline(target)
@@ -1112,12 +1071,12 @@ def main():
 
         # save results to a report file
         rheader = report_header(run_prefix[:-1], target.name, saved_args)
-        log_to_report(artifact_dir, rheader + method.results_txt)
+        log_to_report(artifact_prefix, rheader + method.results_txt)
 
         #method.show_results()
         print("Results are in the report file")
     else:
-        tune_boot_time(methods, target, artifact_dir)
+        tune_boot_time(methods, target, artifact_prefix)
 
     # FIXTHIS - should support an option to clean up working files
     print("Data files for this run are in '%s' with the prefix '%s'" % (artifact_dir, run_prefix))
