@@ -9,6 +9,7 @@
 
 import sys
 import os
+import stat
 import re
 from signal import signal, SIGPIPE, SIG_DFL
 from subprocess import getstatusoutput
@@ -52,6 +53,12 @@ def vprint(msg):
     if verbose:
         print(msg)
 
+def is_readable_file(filepath):
+    real_path = os.path.realpath(filepath)
+    if not os.path.isfile(real_path):
+        return False
+    return os.access(real_path, os.R_OK)
+
 def usage():
     print("""Usage: boot-data [<file>] <cmd> [<item>] <options>
 Look up information in a boot-data file (produced by
@@ -89,7 +96,7 @@ Options:
  --debug       Show debug information
 
 Options for 'diff' command:
- -l            List the sections that can be diff'ed
+ -l            List the sections or data types that can be diff'ed
  -s <section>  Specify an individual section (or data element) to diff
 """)
     sys.exit(0)
@@ -417,10 +424,11 @@ def get_lines_1_2(bd1, bd2, sec_name):
 # KERNEL MESSAGES - order not critical, start time not critical
 #   delta matters, internal numbers might matter
 class kline_class():
-    def __init__(self, line, rest, index, timestamp, delta):
+    def __init__(self, line, rest, index, ts_str, timestamp, delta):
         self.line = line  # full line
         self.rest = rest  # line without timestamp
         self.index = index
+        self.ts_str = ts_str
         self.timestamp = timestamp
         self.delta = delta
         self.duration = 0
@@ -429,6 +437,9 @@ class kline_class():
 
         self.set_match_str()
         self.id = self.match_str + " -i%s" % str(self.index)
+        self.kline_match = None
+        # number from 0 to 10, 0=no match
+        self.match_confidence = 0
 
     def set_match_str(self):
         # to generate id, mask numbers and append index
@@ -476,17 +487,17 @@ def parse_kline(line):
     m = re.match(ts_kline_regex, line)
     if m:
         g = m.groups()
-        t_str = g[0]
+        ts_str = g[0]
         rest = g[1]
         try:
-            timestamp = int(float(t_str) * 1000000)
+            timestamp = int(float(ts_str) * 1000000)
         except ValueError:
             timestamp = 0
     else:
         timestamp = 0
         rest = line
 
-    return timestamp, rest
+    return ts_str, timestamp, rest
 
 # build data structures for diffing kernel message lines
 # klines = map of list of klines, with kline.match_str being key
@@ -501,14 +512,14 @@ def get_klines(lines):
         line = lines[i].strip()
         if not line:
             continue
-        timestamp, rest = parse_kline(line)
+        ts_str, timestamp, rest = parse_kline(line)
         if timestamp:
             delta = last_timestamp - timestamp
             last_timestamp = timestamp
         else:
             #wprint("Got a 0 timestamp on line %d: '%s" % (i, line))
             delta = 0
-        kline = kline_class(line, rest, i, timestamp, delta)
+        kline = kline_class(line, rest, i, ts_str, timestamp, delta)
         if kline.match_str not in klines:
             klines[kline.match_str] = [kline]
         else:
@@ -521,62 +532,148 @@ def get_klines(lines):
     return (klines, kline_list)
 
 # return the best match for kline1 out of klines2 messages
-def get_best_kline_match(kline1, klines2, ts_delta):
+# returns (best_match, confidence)
+# best_match can be None, confidence is in [0..10]
+def get_best_kline_match(kline1, klines2, kline2_list):
+    get_best_debug = False
+
     best = None
+    confidence = 0
 
+    # look for exact match on match_str
     matches = klines2.get(kline1.match_str, None)
-    if not matches:
-        return None
-
-    # scan through matches for best match
-    # find closest one, by index, that is unused
-
     # matches should be sorted by index
     # find first unused one
-    for candidate_kline in matches:
-        if candidate_kline.used:
-            continue
-        best = candidate_kline
+    if matches:
+        for candidate_kline in matches:
+            if candidate_kline.used:
+                continue
+            best = candidate_kline
+            confidence = 10
+            return best, confidence
 
-    # if no unused candidates, return None
-    return best
+    # try searching whole kline2 space, with weaker match_strs
+    # collect tuples (kline2, confidence)
+    weak_matches = []
+    no_num_match_str1 = re.sub("[0-9]","", kline1.match_str)
+    early_match_str1 = no_num_match_str1[:20]
+    earlier_match_str1 = early_match_str1[:10]
+    first_match = False
+    confidence = 0
+    for kline2 in kline2_list:
+        if kline2.used:
+            continue
+        no_num_match_str2 = re.sub("[0-9]","", kline2.match_str)
+        early_match_str2 = no_num_match_str2[:20]
+        earlier_match_str2 = early_match_str2[:10]
+        if no_num_match_str1 == no_num_match_str2:
+            if first_match:
+                confidence = 9
+            else:
+                confidence = 8
+            first_match = True
+            weak_matches.append((kline2, confidence))
+            continue
+        if early_match_str1 == early_match_str2:
+            if first_match:
+                confidence = 6
+            else:
+                confidence = 5
+            first_match = True
+            weak_matches.append((kline2, confidence))
+            continue
+        if earlier_match_str1 == earlier_match_str2:
+            if first_match:
+                confidence = 3
+            else:
+                confidence = 2
+            first_match = True
+            weak_matches.append((kline2, confidence))
+
+    # find the item with the highest confidence
+    if weak_matches:
+        weak_matches_sorted = sorted(weak_matches, key=itemgetter(1))
+        best, confidence = weak_matches_sorted[-1]
+
+    if get_best_debug:
+        print("in get_best_kline_match")
+        print(f"  {kline1.rest=}")
+        print(f"  {kline1.match_str=}")
+        if best:
+            print(f"  {best.rest=}")
+            print(f"  {best.match_str=}")
+        else:
+            print(f"  {best}")
+        print(f"  {confidence=}")
+
+    return best, confidence
+
+def kmsg_show_line(kline1, kline2, index_delta, ts_delta, reason):
+    debug_kmsg = False
+    #debug_kmsg = True
+
+    dmsg = ""
+    delta1 = abs(float(kline1.delta) / 1000000)
+    kline1_str = f"[{kline1.ts_str}] <{delta1:9.6f}> {kline1.rest}"
+    dmsg += f"   {kline1.match_str=}\n"
+    dmsg += "   line1 duration = %d\n" % kline1.duration
+    dmsg += "   line1 delta = %d\n" % kline1.delta
+    kline1.used = True
+    if kline2:
+        prefix = " "
+        delta2 = abs(float(kline2.delta) / 1000000)
+        pad = " " * max(100 - len(kline1_str), 1)
+        suffix = f"{pad}[{kline2.ts_str}] <{delta2:9.6f}> d={ts_delta}\n"
+        kline2.used = True
+        dmsg += "   index delta = %d\n" % index_delta
+        dmsg += "   timestamp delta = %d\n" % ts_delta
+        dmsg += "   line2 duration = %d\n" % kline2.duration
+        dmsg += "   line2 delta = %d\n" % kline2.delta
+        dmsg += f"   {kline2.match_str=}\n"
+
+    else:
+        prefix = "-"
+        suffix = "\n"
+
+    dmsg += "   reason: %s\n" % reason
+    if not debug_kmsg:
+        dmsg = ""
+
+    return prefix + kline1_str + suffix + dmsg
+
 
 def diff_kmsg(bd1, bd2, desc1, desc2):
-    output = diff_initcalls(bd1, bd2, desc1, desc2)
+    global verbose
 
-    output += "FIXTHIS - need to finish diff_kmsg()\n"
-    return output
-
-    sec_name = "KERNEL MESSAGES"
-    lines1, lines2 = get_lines_1_2(bd1, bd2, sec_name)
+    lines1, lines2 = get_lines_1_2(bd1, bd2, "KERNEL MESSAGES")
 
     klines1, kline1_list = get_klines(lines1)
     klines2, kline2_list = get_klines(lines2)
 
-    # FIXTHIS - now do something with these lines
-    # algorithm:
-    #   for each kline in kline1_list:
-    #      find matching kline in klines2
-    #         see what their relationship is
-    #         are their durations similar?
-    #         are their timstamps similar?
-    #         adjust running timestamp delta based on index
-    #         keep cumulative timestamp delta to report (put into region?)
-    output = ""
+    # build a list of output strings first, then intersperse
+    #  unmatched items from klines2_list on output
+
+    # output_tuples = [(kline1, out_str),...]
+    output_tuples = []
+
     index_delta = 0
     last_index_delta = 0
     ts_delta = 0
     last_ts_delta = 0
-    unmatched_count = 0
     for kline1 in kline1_list:
         show_line = False
-        #show_line = True
-        #reason = "debug"
-        kline2 = get_best_kline_match(kline1, klines2, ts_delta)
+        if verbose:
+            show_line = True
+            reason = "debug"
+
+        kline2, confidence = get_best_kline_match(kline1, klines2, kline2_list)
         if kline2:
+            kline1.kline_match = kline2
+            kline1.match_confidence = confidence
             kline2.used = True
             index_delta = kline2.index - kline1.index
             ts_delta = kline2.timestamp - kline1.timestamp
+
             # if lines shifted position, show them
             if index_delta != last_index_delta:
                 #show_line = True
@@ -604,56 +701,100 @@ def diff_kmsg(bd1, bd2, desc1, desc2):
             # other criteria?
         else:
             # show any unmatched lines
-            unmatched_count += 1
             show_line = True
             reason = "has no match"
 
+        debug_kmsg = False
         if show_line:
-            delta1 = abs(float(kline1.delta) / 1000000)
-            output += f"-<{delta1:12.6f}>{kline1.line}\n"
-            if kline2:
+            out_str = kmsg_show_line(kline1, kline2, index_delta, ts_delta, reason)
+            output_tuples.append((kline1, out_str))
+
+        # done with this kline1
+
+    # build 'output', interspersing unused k2 lines into output_tuples
+    output = ""
+    i = 0
+    j = 0
+    k1_k2_timestamp = 0
+    last_k2_timestamp = 0
+    while i < len(output_tuples):
+        kline1, out_str = output_tuples[i]
+
+        # move to first unused kline2
+        while j < len(kline2_list) and kline2_list[j].used:
+            j += 1
+
+        try:
+            kline2 = kline2_list[j]
+        except IndexError:
+            kline2 = None
+
+        # output from output_tuples or kline2_list?
+        if kline1.kline_match:
+            k1_k2_timestamp = kline1.kline_match.timestamp
+
+        if kline2 and (kline2.timestamp < k1_k2_timestamp):
+            # handle weirdness if the timestamps revert back in value
+            # due to the early times patch
+            if kline2.timestamp >= last_k2_timestamp:
+                # format a '+' line with no k1 timestamp or delta data
                 delta2 = abs(float(kline2.delta) / 1000000)
-                output += f"+<{delta2:12.6f}>{kline2.line}\n"
-                output += "   index delta = %d\n" % index_delta
-                output += "   timestamp delta = %d\n" % ts_delta
-                output += "   line1 duration = %d\n" % kline1.duration
-                output += "   line1 delta = %d\n" % kline1.delta
-                output += "   line2 duration = %d\n" % kline2.duration
-                output += "   line2 delta = %d\n" % kline2.delta
-            output += "   reason: %s\n" % reason
+                part1 = f"                           {kline2.rest}"
+                pad = " " * max(100 - len(part1), 1)
+                part2 = f"{pad}[{kline2.ts_str}] <{delta2:9.6f}> d=n/a\n"
+                out_str = "+" + part1 + part2
 
-    # show unmatched klines in kline2_list
-    # FIXTHIS - should show these inline for more 'diff'-like output
-    output += "Unmatched klines from file2 (%s)\n" % desc2
-    for kline2 in kline2_list:
-        if not kline2.used:
-            output += f"+{kline2.line}\n"
+                last_k2_timestamp = kline2.timestamp
+                #print(f"TRB: {out_str=}")
+                kline2.used = True
+                j += 1
+            else:
+                i += 1
+                last_k2_timestamp = k1_k2_timestamp
+        else:
+            # use current out_str from output_tuples
+            i += 1
+            last_k2_timestamp = k1_k2_timestamp
 
-    output += "FIXTHIS - need to finish diff_kmsg()\n"
-    output += "some debug data:\n"
+        output += out_str
+        #print(f"TRB: {out_str}", end="")
 
-    output += "file1 lines with duplicate match_strs\n"
-    count_dup_match_str1 = 0
-    for klist in klines1.values():
-        if len(klist) > 1:
-            output += f"match_str={klist[0].match_str}\n"
-            count_dup_match_str1 += 1
-            for kline in klist:
-                output += f"  {kline.index}: {kline.line}\n"
-    output += f"{count_dup_match_str1=}\n"
+    if debug_kmsg:
+        output += "some debug data:\n"
 
-    output += "\n#######\nfile2 lines with duplicate match_strs\n"
-    count_dup_match_str2 = 0
-    for klist in klines2.values():
-        if len(klist) > 1:
-            output += f"match_str={klist[0].match_str}\n"
-            count_dup_match_str2 += 1
-            for kline in klist:
-                output += f"  {kline.index}: {kline.line}\n"
-    output += f"{count_dup_match_str2=}\n"
+        output += "\n#######\nfile2 lines with duplicate match_strs\n"
+        count_dup_match_str2 = 0
+        unused_count = 0
+        for klist in klines2.values():
+            if len(klist) > 1:
+                output += f"match_str={klist[0].match_str}\n"
+                count_dup_match_str2 += 1
+                for kline in klist:
+                    if kline.used:
+                        used_str = "   used "
+                    else:
+                        used_str = "*unused*"
+                        unused_count += 1
+
+                    output += f"  {used_str} {kline.index}: {kline.line}\n"
+        output += f"{count_dup_match_str2=}\n"
+        output += f"{unused_count=}\n"
+
+    # report break
+    report_break = '\n' + ("-" * 60) + "\n\n"
+    output += report_break
+
+    output += diff_initcalls(bd1, bd2, desc1, desc2)
+
+    output += report_break
+
+    output += diff_regions(bd1, bd2, desc1, desc2)
+
     return output
 
 def diff_mem(bd1, bd2, desc1, desc2):
+    #sec_name = "MEMORY"
+
     items = ["MEM_TOTAL", "MEM_USED"]
 
     desc1_str = get_descr_str("file1", desc1)
@@ -735,27 +876,25 @@ def diff_ext(bd1, bd2, desc1, desc2, sec_name, ext_tool="diff -u"):
     return output
 
 def diff_process(bd1, bd2, desc1, desc2):
-    sec_name = "PROCESSES"
-    lines1, lines2 = get_lines_1_2(bd1, bd2, sec_name)
+    lines1, lines2 = get_lines_1_2(bd1, bd2, "PROCESSES")
 
     output = "FIXTHIS - need to finish diff_process()"
     return output
 
 def diff_config(bd1, bd2, desc1, desc2):
-    sec_name = "CONFIG"
+    #sec_name = "CONFIG"
 
     desc1_str = get_descr_str("file1", desc1)
     desc2_str = get_descr_str("file2", desc2)
-
     header = f"--- {desc1_str}\n"
     header += f"+++ {desc2_str}\n"
 
-    output = diff_ext(bd1, bd2, desc1, desc2, sec_name, "diffconfig")
+    output = diff_ext(bd1, bd2, desc1, desc2, "CONFIG", "diffconfig")
 
     return header + output
 
 def diff_systemd(bd1, bd2, desc1, desc2):
-    sec_name = "SYSTEMD INFO"
+    #sec_name = "SYSTEMD INFO"
 
     # get data, sorted by name
     sd1_names = list(bd1.systemd_items.keys())
@@ -926,6 +1065,93 @@ def diff_initcalls(bd1, bd2, desc1, desc2):
 
     return output
 
+def diff_regions(bd1, bd2, desc1, desc2):
+    # get data, sorted by name
+    reg1_names = list(bd1.regions.keys())
+    reg1_names.sort()
+    reg1_names.append("zzz**end**")
+
+    reg2_names = list(bd2.regions.keys())
+    reg2_names.sort()
+    reg2_names.append("zzz**end**")
+
+    # gather data, then sort and display it (by longest duration?)
+    # pick from one list, then the other, according to merge order
+    i = 0
+    j = 0
+    tuples = []
+    while i < len(reg1_names)-1 and j < len(reg2_names)-1:
+        name1 = reg1_names[i]
+        name2 = reg2_names[j]
+        #print(f"{i=},{j=},{name1=},{name2=}")
+        if name1 < name2:
+            name = name1
+            i += 1
+            value1 = bd1.regions[name]
+            if name in bd2.regions:
+                value2 = bd2.regions[name]
+                delta = value2 - value1
+            else:
+                value2 = -1
+                delta = -value1
+
+        if name1 == name2:
+            name = name1
+            i += 1
+            j += 1
+            value1 = bd1.regions[name]
+            if name in bd2.regions:
+                value2 = bd2.regions[name]
+                delta = value2 - value1
+            else:
+                value2 = -1
+                delta = -value1
+
+        if name1 > name2:
+            name = name2
+            j += 1
+            value2 = bd2.regions[name]
+            if name in bd1.regions:
+                value1 = bd1.regions[name]
+                delta = values - value1
+            else:
+                value1 = -1
+                delta = value2
+
+        tuples.append((name, value1, value2, delta, abs(delta)))
+
+    data = sorted(tuples, key=itemgetter(1), reverse=True)
+
+    output = "Region table (omitting regions with duration 0 usecs)\n"
+    output += "Highlight (with !) changed durations: over 10ms delta, or missing.\n"
+    output += "Omit items with zeros or small deltas (< 3 usecs).\n\n"
+    output += "region                                file1   file2   delta\n"
+    output += "===================================== ======= ======= ===========\n"
+    for name, v1, v2, delta, abs_delta  in data:
+        note = " "
+        if v1 == 0 and v2 == 0:
+            continue
+
+        if abs_delta < 3:
+            continue
+
+        if v1 == -1:
+            v1 = "----"
+            note = "!"
+        if v2 == -1:
+            v2 = "----"
+            note = "!"
+
+        # mark any change over 10ms
+        if abs_delta > 10000:
+            note = "!"
+
+        output += "%-36s %7s %7s %7s %s usecs" % (name, v1, v2, delta, note)
+        output += "\n"
+
+    return output
+
+
 # section_prefs has the table of which diff to use per section:
 # consisting of tuples like this:
 #   (simple section name, section name, preferred diff method)
@@ -950,6 +1176,8 @@ section_prefs = {"uptime": ("UPTIME", "text"),
                  "config": ("CONFIG", "diff_config"),
                  "systemd": ("SYSTEMD INFO", "diff_systemd"),
                  "kmsg": ("KERNEL MESSAGES", "diff_kmsg"),
+                 "initcalls": ("KERNEL MESSAGES", "diff_initcalls"),
+                 "regions": ("KERNEL MESSAGES", "diff_regions"),
                  }
 
 
@@ -976,13 +1204,14 @@ def do_diff(file1, file2, options):
     # create a diff per section:
     # parse requested section name, if any
     if req_section and req_section not in section_prefs:
-        error_out("Invalid section '%s' requested." % req_section)
+        error_out("Invalid section or data '%s' requested." % req_section)
 
     if req_section and not req_section == "all":
         req_sections = [req_section]
     else:
         req_sections = ["gbd", "kernel", "os", "mem", "disk", "mounts",
-                        "processes", "cores", "config", "systemd", "kmsg"]
+                        "processes", "cores", "config", "systemd", "kmsg",
+                        "initcalls", "regions"]
 
     bd1 = boot_data_parser.parse_boot_data(None, file1)
     bd2 = boot_data_parser.parse_boot_data(None, file2)
@@ -1006,6 +1235,10 @@ def do_diff(file1, file2, options):
             output = diff_systemd(bd1, bd2, desc1, desc2)
         elif diff_method == "diff_kmsg":
             output = diff_kmsg(bd1, bd2, desc1, desc2)
+        elif diff_method == "diff_initcalls":
+            output = diff_initcalls(bd1, bd2, desc1, desc2)
+        elif diff_method == "diff_regions":
+            output = diff_regions(bd1, bd2, desc1, desc2)
         else:
             wprint("FIXTHIS - diff_method '%s' for section '%s' is not implemented" % (diff_method, section))
 
@@ -1094,8 +1327,8 @@ def main():
 
     if "-f" in sys.argv:
         file2 = get_opt_with_arg('-f')
-        if not os.path.isfile(file2):
-            error_out("'%s' is not a regular file" % file2)
+        if not is_readable_file(file2):
+            error_out("'%s' is not a readable file" % file2)
 
     allowed_item_types = ["meta", "initcall", "region", "systemd", "config"]
     if "-t" in sys.argv:
@@ -1147,7 +1380,7 @@ def main():
                 error_out("Missing boot-data file argument (use -h for help)")
 
     # sanity check some args
-    if file1 and not os.path.isfile(file1):
+    if file1 and not is_readable_file(file1):
         error_out("Missing or invalid boot-data file: %s" % file1)
 
     if cmd in ["compare", "diff"] and not file2:
