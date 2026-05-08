@@ -116,22 +116,17 @@ def TRB_wait_for_input(msg):
     return(input("%s: continue? " % msg))
 
 def is_readable_file(path):
-    try:
-        st = os.stat(filepath, follow_symlinks=True)
-        if not stat.S_ISREG(st.st_mode):
-            return False
-        return bool(st.st_mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
-    except OSError:
+    real_path = os.path.realpath(filepath)
+    if not os.path.isfile(real_path):
         return False
+    return os.access(real_path, os.R_OK)
+
 
 def is_executable_file(path):
-    try:
-        st = os.stat(filepath, follow_symlinks=True)
-        if not stat.S_ISREG(st.st_mode):
-            return False
-        return bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-    except OSError:
+    real_path = os.path.realpath(filepath)
+    if not os.path.isfile(real_path):
         return False
+    return os.access(real_path, os.X_OK)
 
 
 # put a wrapper around subprocess execution
