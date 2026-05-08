@@ -7,12 +7,13 @@
 #     for a platform
 #
 # todo:
+# - manage method.needs_kbuild and
 # - hide stderr from builds, if requested (default opt-in to build messages)
 #   - or show if requested (default opt-out to build messages)
 # - detect build failures
 # - handle different optimization methods:
 #   - change command line setting
-#     - add low_mem
+#     + add low_mem
 #     - add deferred initcalls
 #   - remove devicetree entries
 #   - remove udev entries
@@ -110,6 +111,29 @@ def vprint(msg):
     if verbose:
         print(msg)
 
+# use 'TRB' in name so I can find and move it easily
+def TRB_wait_for_input(msg):
+    return(input("%s: continue? " % msg))
+
+def is_readable_file(path):
+    try:
+        st = os.stat(filepath, follow_symlinks=True)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        return bool(st.st_mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
+    except OSError:
+        return False
+
+def is_executable_file(path):
+    try:
+        st = os.stat(filepath, follow_symlinks=True)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        return bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+    except OSError:
+        return False
+
+
 # put a wrapper around subprocess execution
 # if in verbose mode,
 #   output to my stdout while the subprocess is running
@@ -154,17 +178,19 @@ def parse_kernel_config(config_text):
 
 # define a class for optimization methods
 class opt_method_class():
-    def __init__(self, name, description, opt_type="unknown"):
-        self.name = name
-        self.description = description
-        self.opt_type = opt_type
-        self.results_txt = "#"*70  + "\n" + \
+    def __init__(selfm, name, description, opt_type="unknown"):
+        selfm.name = name
+        selfm.description = description
+        selfm.opt_type = opt_type
+        selfm.results_txt = "#"*70  + "\n" + \
             "=== Results report for optimization method '%s' ===\n" % name
-        self.compare_list = ["time_to_init"]
+        selfm.compare_list = ["time_to_init"]
 
         # artifact_prefix gets set later
         # set to something that will raise exception if used in string context
-        self.artifact_prefix = 999
+        selfm.artifact_prefix = 999
+        selfm.needs_kbuild = False
+        selfm.instrumentation_list = []
 
     def save_baseline(self, arg):
         raise NotImplementedError
@@ -172,42 +198,102 @@ class opt_method_class():
     def restore_baseline(self, arg):
         raise NotImplementedError
 
-    def instrument_target(self, target):
-        # FIXTHIS - could put general instrumentation, like
-        # adding 'log_buf_len=10M quiet initcall' to cmdline
-        print("No additional instrumentation needed")
+    def instrument_target(selfm, target):
+        # FIXTHIS - could support cmdline instrumentation,
+        #   like adding 'log_buf_len=1M quiet initcall' to cmdline
 
-    def detect_optimization(self, arg):
+        # all instrumentation actions occur while we're in the kernel src dir
+        target.change_to_src_dir()
+
+        if selfm.instrumentation_list:
+            # do two passes, patches and instr_type validation first
+            for instr_tuple in selfm.instrumentation_list:
+                instr_type = instr_tuple[0]
+                instr_data = instr_tuple[1:]
+                if instr_type == "patch":
+                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    target.apply_patch(instr_data[0])
+                    selfm.needs_kbuild = True
+                elif instr_type in ["printk", "cmdline"]:
+                    continue
+                else:
+                    error_out("Invalid instrumentation type '%s' for method '%s'" % (instr_type, selfm.name))
+
+            # now do printks and cmdlines
+            for instr_tuple in selfm.instrumentation_list:
+                instr_type = instr_tuple[0]
+                instr_data = instr_tuple[1:]
+                if instr_type == "printk":
+                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    # instr_data should be a 3-tuple here
+                    target.add_printk(*instr_data)
+                    selfm.needs_kbuild = True
+                elif instr_type == "cmdline":
+                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    target.add_cmdline(instr_data[0])
+        else:
+            print("No instrumentation added.")
+
+        vprint("TRB: '%s'" % str(selfm))
+        vprint("TRB: needs_kbuild=%s" % str(selfm.needs_kbuild))
+
+        # wait for input (to investigate what happened)
+        TRB_wait_for_input("Check instrumentation")
+
+        target.change_to_start_dir()
+
+    def de_instrument_target(selfm, target):
+        target.change_to_src_dir()
+        target.restore_cmdline()
+        target.restore_ksrc_files()
+        target.unapply_patches()
+        target.change_to_start_dir()
+
+    def detect_optimization(selfm, arg):
         # should return (TRUE|FALSE, msg)
         return NotImplementedError
 
-    def apply_optimization(self, arg, kernel_id=None):
+    def apply_optimization(selfm, arg, kernel_id=None):
         raise NotImplementedError
 
-    def set_results(self, results_txt):
-        self.results_txt += results_txt
-        self.results_txt += "\n##########\n"
+    def set_results(selfm, results_txt):
+        selfm.results_txt += results_txt
+        selfm.results_txt += "\n##########\n"
 
-    def show_results(self):
-        print(self.results_txt)
+    def show_results(selfm):
+        print(selfm.results_txt)
 
-    def get_compare_list(self):
+    def get_compare_list(selfm):
         # return method-specific items to compare in a report
-        return self.compare_list
+        return selfm.compare_list
+
+    def add_instrumentation(selfm, instr_tuple):
+        # do some validation
+        # printk is (type, region, position, location)
+        instr_type = instr_tuple[0]
+        if instr_type == "printk":
+            position = instr_tuple[2]
+            if position not in ["before", "after"]:
+                error_out("Invalid position in instrumentation %s" % str(instr_tuple))
+
+        # t is a tuple for either printk or patch instrumentation
+        selfm.instrumentation_list.append(instr_tuple)
+        if instr_type in ["printk", "patch"]:
+            selfm.needs_kbuild = True
 
 # the optimization method class for config items
 class config_om_class(opt_method_class):
-    def __init__(self, name, description, config_name, config_value):
+    def __init__(selfcm, name, description, config_name, config_value):
         super().__init__(name, description, "kernel_config")
-        self.config_name = config_name
-        self.config_value = config_value
-        #self.kernel_cmdline_path = ""
+        selfcm.config_name = config_name
+        selfcm.config_value = config_value
+        selfcm.needs_kbuild = True
 
-    def save_baseline(self, target):
+    def save_baseline(selfcm, target):
         target.save_build_config()
         return
 
-    def restore_baseline(self, target):
+    def restore_baseline(selfcm, target):
         target.restore_build_config()
 
         print(" - Rebuilding kernel...")
@@ -219,29 +305,29 @@ class config_om_class(opt_method_class):
         # reset working dir to where we started
         target.change_to_start_dir()
 
-    def detect_optimization(self, target):
+    def detect_optimization(selfcm, target):
         # report whether this optimization is already applied
         # check config, return a string
         configs = target.get_target_configs()
 
-        if self.config_name not in configs:
+        if selfcm.config_name not in configs:
             return (False, "config %s not found")
 
-        if configs[self.config_name] == self.config_value:
-            return (True, "config %s has the value %s" % self.config_name, self.config_value)
+        if configs[selfcm.config_name] == selfcm.config_value:
+            return (True, "config %s has the value %s" % selfcm.config_name, selfcm.config_value)
         else:
-            return (False, "config %s: current value of %s does not match desired value of %s" % (self.config_name, configs[self.config_name], self.config_value))
+            return (False, "config %s: current value of %s does not match desired value of %s" % (selfcm.config_name, configs[selfcm.config_name], selfcm.config_value))
 
-    def apply_optimization(self, target, kernel_id):
+    def apply_optimization(selfcm, target, kernel_id):
         target.change_to_src_dir()
 
         # check if config is different from requested value
         configs = target.get_target_configs()
 
-        old_value = configs.get(self.config_name, "missing")
-        new_value = self.config_value
+        old_value = configs.get(selfcm.config_name, "missing")
+        new_value = selfcm.config_value
 
-        old_build_value = target.get_build_config(self.config_name)
+        old_build_value = target.get_build_config(selfcm.config_name)
 
         dprint("config: old_build_value=%s, old_value=%s, new_value=%s" % (old_build_value, old_value, new_value))
         # compare config in source with config
@@ -250,13 +336,13 @@ class config_om_class(opt_method_class):
             wprint(" old_value=%s, new_value=%s, old_build_value=%s" % (old_value, new_value, old_build_value))
 
         # set config to new value
-        print(" - Applying optimization: changing config value %s: %s -> %s" % (self.config_name, old_build_value, new_value))
-        target.set_build_config(self.config_name, new_value)
+        print(" - Applying optimization: changing config value %s: %s -> %s" % (selfcm.config_name, old_build_value, new_value))
+        target.set_build_config(selfcm.config_name, new_value)
 
-        # TRB: wait for input (to investigate what happened)
-        #input("Press enter to continue...")
+        # wait for input (to investigate what happened)
+        #TRB_wait_for_input("Check optimzation application")
 
-        self.saved_value = old_build_value
+        selfcm.saved_value = old_build_value
 
         # set kernel id
         target.set_localversion(kernel_id)
@@ -274,12 +360,12 @@ class config_om_class(opt_method_class):
 
         return status, output
 
-    def undo_optimization(self, target):
+    def undo_optimization(selfcm, target):
         target.change_to_src_dir()
 
         # set config to saved value
-        #target.set_build_config(self.config_name, self.saved_value)
-        #print(" - Undoing optimization: changing config value %s=%s", self.config_name, self.saved_value)
+        #target.set_build_config(selfcm.config_name, selfcm.saved_value)
+        #print(" - Undoing optimization: changing config value %s=%s", selfcm.config_name, selfcm.saved_value)
 
         # revert to saved build config
         target.restore_build_config()
@@ -287,105 +373,107 @@ class config_om_class(opt_method_class):
         # clear kernel id
         target.clear_localversion()
 
-        # rebuild kernel
-        print(" - Rebuilding kernel...")
-        status, output = target.ttc("kbuild", verbose)
-
-        # install kernel
-        print(" - Installing kernel...")
-        status, output = target.ttc("kinstall", verbose)
-
         # reset working dir to where we started
         target.change_to_start_dir()
         return
 
 # the optimization method class for kernel command line options
 class cmdline_om_class(opt_method_class):
-    def __init__(self, name, description, option_str):
+    def __init__(selflm, name, description, option_str):
         super().__init__(name, description, "kernel_cmdline")
-        self.option_str = option_str
+        selflm.option_str = option_str
         if "=" in option_str:
-            self.option_name, self.option_value = option_str.split("=", 1)
+            selflm.option_name, selflm.option_value = option_str.split("=", 1)
 
 
-    def save_baseline(self, target):
+    def save_baseline(selflm, target):
         # save the current (configured) target cmdline
         status, cur_cmdline = target.ttc("get_cmdline")
-        saved_cmdline_path = self.artifact_prefix + "saved_cmdline.txt"
+        saved_cmdline_path = selflm.artifact_prefix + "saved_cmdline.txt"
         with open(saved_cmdline_path, "w") as fd:
                   fd.write(cur_cmdline)
         return
 
-    def restore_baseline(self, target):
-        saved_cmdline_path = self.artifact_prefix + "saved_cmdline.txt"
-        cmdline = open(saved_cmdline_path, "r").read()
+    def restore_baseline(selflm, target):
+        saved_cmdline_path = selflm.artifact_prefix + "saved_cmdline.txt"
+        cmdline = open(saved_cmdline_path, "r").read().rstrip()
         status, output = target.ttc("set_cmdline -r " + cmdline)
 
-    def detect_optimization(self, target):
+    def detect_optimization(selflm, target):
         # report whether this optimization is already applied
         # check config, return a string
         status, cmdline = target.ttc("get_cmdline -s")
 
-        if self.option_str in cmdline:
-            return (True, "cmdline option '%s' is already in current command line" % self.option_str)
+        if selflm.option_str in cmdline:
+            return (True, "cmdline option '%s' is already in current command line" % selflm.option_str)
 
-        return (False, "Did not find '%s' in current command line" % self.option_str)
+        return (False, "Did not find '%s' in current command line" % selflm.option_str)
 
-    def apply_optimization(self, target, kernel_id):
-        print(" - Applying optimization: adding '%s' to command line" % self.option_str)
+    def apply_optimization(selflm, target, kernel_id):
+        print(" - Applying optimization: adding '%s' to command line" % selflm.option_str)
 
         status, cmdline = target.ttc("get_cmdline")
         if status != 0:
              eprint("Could not get current configured command line")
 
-        self.saved_cmdline = cmdline
+        selflm.saved_cmdline = cmdline
 
-        # FIXTHIS - for now, assume option can be appended at the end
-        target.ttc("set_cmdline " + self.option_str)
+        # FIXTHIS - for now, assume optimization option can be appended at the end of cmdline
+        target.ttc("set_cmdline " + selflm.option_str)
         return status
 
-    def undo_optimization(self, target):
-        status, cmdline = target.ttc("set_cmdline -r" + self.saved_cmdline)
+    def undo_optimization(selflm, target):
+        status, cmdline = target.ttc("set_cmdline -r" + selflm.saved_cmdline)
         if status != 0:
              eprint("Could not set current configured command line")
         return
 
 class target_class():
-    def __init__(self, name):
+    def __init__(selft, name):
         # save start dir for restoration later
-        self.start_dir = os.getcwd();
+        selft.start_dir = os.getcwd();
 
         # sets up target instance
         # raises ValueError on invalid target name
-        self.name = name
+        selft.name = name
         # make sure target is recognized by ttc
-        status, output = self.ttc("info")
+        status, output = selft.ttc("info")
         if status != 0:
             raise ValueError
 
         # set some variables we may need later
-        self.KERNEL_SRC = self.get_ttc_var("KERNEL_SRC", ".")
-        if not os.path.isfile(self.KERNEL_SRC + "/MAINTAINERS"):
-            wprint("Missing MAINTAINERS file in KERNEL_SRC dir: %s - check configuration" % self.KERNEL_SRC)
+        selft.KERNEL_SRC = selft.get_ttc_var("KERNEL_SRC", ".")
+        if not os.path.isfile(selft.KERNEL_SRC + "/MAINTAINERS"):
+            wprint("Missing MAINTAINERS file in KERNEL_SRC dir: %s - check configuration" % selft.KERNEL_SRC)
             dprint("current dir=%s" % os.getcwd())
         # make KERNEL_SRC path absolute
-        self.KERNEL_SRC = os.path.abspath(self.KERNEL_SRC)
+        selft.KERNEL_SRC = os.path.abspath(selft.KERNEL_SRC)
 
-        self.KBUILD_OUTPUT = self.get_ttc_var("KBUILD_OUTPUT", self.KERNEL_SRC)
+        selft.KBUILD_OUTPUT = selft.get_ttc_var("KBUILD_OUTPUT", selft.KERNEL_SRC)
 
         # make this path absolute
-        self.change_to_src_dir()
-        self.KBUILD_OUTPUT = os.path.abspath(self.KBUILD_OUTPUT)
-        self.change_to_start_dir()
+        selft.change_to_src_dir()
+        selft.KBUILD_OUTPUT = os.path.abspath(selft.KBUILD_OUTPUT)
+        selft.change_to_start_dir()
 
-        self.CONFIGS = {}   # fill the CONFIGS dictionary in, as needed
-        self.config_saved = False
+        selft.CONFIGS = {}   # fill the CONFIGS dictionary in, as needed
+        selft.config_saved = False
 
-        self.artifact_prefix = 999
+        selft.artifact_prefix = 999
+        selft.saved_ksrc_files = []
+        selft.applied_ksrc_patches = []
+        selft.patch_dir = ""
+
+        selft.orig_cmdline = ""
+        status, cmdline = selft.ttc("get_cmdline")
+        if status != 0:
+             eprint("Could not get (original) current configured command line")
+        selft.orig_cmdline = cmdline
+        print("TRB: orig_cmdline=%s" % cmdline)
 
     # return the output from 'ttc target cmd'
-    def ttc(self, cmd, echo=False):
-        cmdline = "ttc %s %s" % (self.name, cmd)
+    def ttc(selft, cmd, echo=False):
+        cmdline = "ttc %s %s" % (selft.name, cmd)
         status, output = execute(cmdline, echo)
         if echo:
             print(output)
@@ -393,112 +481,112 @@ class target_class():
         dprint("output='%s'" % output)
         return (status, output)
 
-    def get_ttc_var(self, var, default):
-        status, output = execute("ttc %s info -n %s" % (self.name, var))
+    def get_ttc_var(selft, var, default):
+        status, output = execute("ttc %s info -n %s" % (selft.name, var))
         if status == 0:
             return output.strip()
         else:
             return default
 
-    def run(self, cmd, echo=False):
-        return self.ttc("run " + cmd, echo)
+    def run(selft, cmd, echo=False):
+        return selft.ttc("run " + cmd, echo)
 
-    def put(self, src_path, dest_path):
-        return self.ttc("cp %s target:%s" % (src_path, dest_path))
+    def put(selft, src_path, dest_path):
+        return selft.ttc("cp %s target:%s" % (src_path, dest_path))
 
-    def get(self, src_path, dest_path):
-        return self.ttc("cp target:%s %s" % (src_path, dest_path))
+    def get(selft, src_path, dest_path):
+        return selft.ttc("cp target:%s %s" % (src_path, dest_path))
 
-    def reboot_and_wait(self, echo=True):
-        status, output = self.ttc("reboot", echo)
-        status2, output2 = self.ttc("wait_for -t 30 ttc run true", echo)
+    def reboot_and_wait(selft, echo=True):
+        status, output = selft.ttc("reboot", echo)
+        status2, output2 = selft.ttc("wait_for -t 30 ttc run true", echo)
         return status2, output + output2
 
-    def get_target_config(self):
+    def get_target_config(selft):
         # returns the kernel configuration from a target as a string
 
         # look on the target in a variety of locations for the kernel config
         # if found, return the kernel config
         # if not, return the empty string
-        status, output = self.run("zcat /proc/config.gz")
+        status, output = selft.run("zcat /proc/config.gz")
         if status == 0:
             return output
 
-        status, output = self.run("uname -r")
+        status, output = selft.run("uname -r")
         if status == 0:
             release = output.strip()
 
         # if there's a config.ko module, try installing it
         config_ko_path = "/lib/modules/%s/kernel/kernel/configs.ko" % release
-        status, output = self.run("test -f %s" % config_ko_path)
+        status, output = selft.run("test -f %s" % config_ko_path)
         if status == 0:
-            self.run("insmod %s" % config_ko_path)
-            status, output = self.run("zcat /proc/config.gz")
-            self.run("rmmod configs")
+            selft.run("insmod %s" % config_ko_path)
+            status, output = selft.run("zcat /proc/config.gz")
+            selft.run("rmmod configs")
             if status == 0:
                 return output
 
         # if there's a config.ko.xz module, try installing it
         config_koxz_path = "/lib/modules/%s/kernel/kernel/configs.ko.xz" % release
-        status, output = self.run("test -f %s" % config_koxz_path)
+        status, output = selft.run("test -f %s" % config_koxz_path)
         if status == 0:
-            self.run("insmod %s" % config_koxz_path)
-            status, output = self.run("zcat /proc/config.gz")
-            self.run("rmmod configs")
+            selft.run("insmod %s" % config_koxz_path)
+            status, output = selft.run("zcat /proc/config.gz")
+            selft.run("rmmod configs")
             if status == 0:
                 return output
 
         # if there's a build .config file, return that
         build_config_path = "/lib/modules/%s/build/.config" % release
-        status, output = self.run("test -f %s" % build_config_path)
+        status, output = selft.run("test -f %s" % build_config_path)
         if status == 0:
-            status, output = self.run("cat %s" % build_config_path)
+            status, output = selft.run("cat %s" % build_config_path)
             if status == 0:
                 return output
 
         # check /boot directory
         boot_config_path = "/boot/config-%s" % release
-        status, output = self.run("test -f %s" % boot_config_path)
+        status, output = selft.run("test -f %s" % boot_config_path)
         if status == 0:
-            status, output = self.run("cat %s" % boot_config_path)
+            status, output = selft.run("cat %s" % boot_config_path)
             if status == 0:
                 return output
 
         boot_config_path = "/boot/config"
-        status, output = self.run("test -f %s" % boot_config_path)
+        status, output = selft.run("test -f %s" % boot_config_path)
         if status == 0:
-            status, output = self.run("cat %s" % boot_config_path)
+            status, output = selft.run("cat %s" % boot_config_path)
             if status == 0:
                 return output
 
         return ""
 
-    def get_target_configs(self):
+    def get_target_configs(selft):
         # returns the kernel configuration from a target as a dictionary
         # config names are long, including CONFIG_ prefix
         # (e.g. 'CONFIG_CMDLINE')
-        if self.CONFIGS:
-            return self.CONFIGS
+        if selft.CONFIGS:
+            return selft.CONFIGS
 
-        config_text = self.get_target_config()
+        config_text = selft.get_target_config()
         if config_text:
             CONFIGS = parse_kernel_config(config_text)
-            self.CONFIGS = CONFIGS
+            selft.CONFIGS = CONFIGS
 
-        return self.CONFIGS
+        return selft.CONFIGS
 
-    def change_to_src_dir(self):
-        os.chdir(self.KERNEL_SRC)
+    def change_to_src_dir(selft):
+        os.chdir(selft.KERNEL_SRC)
 
-    def change_to_start_dir(self):
-        os.chdir(self.start_dir)
+    def change_to_start_dir(selft):
+        os.chdir(selft.start_dir)
 
-    def get_build_config(self, config_name):
+    def get_build_config(selft, config_name):
         # returns the value of a single config option in the current
         # build config
 
         # read build configs file ($KBUILD_OUTPUT/.config)
-        config_path = self.KBUILD_OUTPUT + "/.config"
+        config_path = selft.KBUILD_OUTPUT + "/.config"
         value = "undefined"
         with open(config_path, "r") as fd:
             for line in fd.readlines():
@@ -515,43 +603,43 @@ class target_class():
 
         return value
 
-    def save_build_config(self, artifact_prefix):
-        if not self.config_saved:
+    def save_build_config(selft, artifact_prefix):
+        if not selft.config_saved:
             # put original build configs into artifact dir
-            config_path = self.KBUILD_OUTPUT + "/.config"
-            save_path = self.artifact_prefix + "saved-config"
+            config_path = selft.KBUILD_OUTPUT + "/.config"
+            save_path = selft.artifact_prefix + "saved-config"
             dprint("Saving build config: from %s to %s" % (config_path, save_path))
             shutil.copy(config_path, save_path)
-            self.config_saved = True
+            selft.config_saved = True
 
-    def restore_build_config(self, artifact_prefix):
-        if not self.config_saved:
+    def restore_build_config(selft, artifact_prefix):
+        if not selft.config_saved:
             eprint("Error restoring build config - original config was not saved!")
             return
 
         # copy original build configs back into build dir
-        save_path = self.artifact_prefix + "saved-config"
-        config_path = self.KBUILD_OUTPUT + "/.config"
+        save_path = selft.artifact_prefix + "saved-config"
+        config_path = selft.KBUILD_OUTPUT + "/.config"
         dprint("Restoring build config: from %s to %s" % (save_path, config_path))
         shutil.copy(save_path, config_path)
 
-    def set_build_config(self, config_name, config_value):
+    def set_build_config(selft, config_name, config_value):
         global verbose
 
         cmd = 'set_config "%s=%s"' % (config_name, config_value)
         # FIXTHIS - need to test set_build_config with quoted string values
 
-        return self.ttc(cmd, verbose)
+        return selft.ttc(cmd, verbose)
 
-    def set_localversion(self, lver_str):
+    def set_localversion(selft, lver_str):
         # we should be in the KERNEL_SRC dir by now
         lv_path = "localversion"
         lv_file = open(lv_path, "w")
         lv_file.write("-" + lver_str + "\n")
         lv_file.close()
-        self.kernel_id = lver_str
+        selft.kernel_id = lver_str
 
-    def clear_localversion(self):
+    def clear_localversion(selft):
         # we should be in the KERNEL_SRC dir by now
         lv_path = "localversion"
         try:
@@ -559,14 +647,189 @@ class target_class():
         except:
             pass
 
-    def check_localversion(self, lver_str = None):
+    def check_localversion(selft, lver_str = None):
         if not lver_str:
-            lver_str = self.kernel_id
-        rcode, output = self.run("uname -r")
+            lver_str = selft.kernel_id
+        rcode, output = selft.run("uname -r")
         if lver_str in output:
             return True
         else:
             return False
+
+    def rebuild_and_install(selft, localversion=""):
+        # NOTE: if you pass a localversion, any preset localversion
+        # will be cleared this function returns.
+        selft.change_to_src_dir()
+
+        if localversion:
+            self.set_localversion(localversion)
+
+        status, output = selft.ttc("kbuild", verbose)
+        if status != 0:
+            eprint("kbuild failure: output='%s'" % output)
+            return status
+
+        status, output = selft.ttc("kinstall", verbose)
+        if status != 0:
+            eprint("kinstall failure: output='%s'" % output)
+            return status
+
+        if localversion:
+            target.clear_localversion()
+
+        selft.change_to_start_dir()
+        return 0
+
+    def save_ksrc_file(selft, filepath):
+        orig_path = selft.KERNEL_SRC + "/" + filepath
+        save_path = selft.KERNEL_SRC + "/" + filepath + ".bttw-orig"
+
+        # check if we've already saved it
+        if filepath in selft.saved_ksrc_files:
+            # have a duplicate save request for this file
+            if os.path.exists(save_path):
+                # if backup already exists, it's ok, we're done
+                #vprint("Note: File '%s' is already on saved file list" % filepath)
+                return
+            else:
+                # if not, something's gone wrong
+                print("Error: backup file handling error for '%s'" % filepath)
+                print("file was already on saved_src_files list, but backup is not present")
+                print("Manually validate the file and restart.")
+                error_out("Aborting now to avoid damage to src tree")
+
+        if not os.path.exists(save_path):
+            # if save is not there, save it now
+            shutil.copy(orig_path, save_path)
+            selft.saved_ksrc_files.append(filepath)
+
+        if not filepath in selft.saved_ksrc_files:
+            print("Error: backup file handling error for '%s'" % filepath)
+            print("File should have been on saved_src_files list, but was not")
+            print("Manually restore file from '%s', remove backup, and restart." % save_path)
+            error_out("Aborting now to avoid damage to src tree")
+
+    def restore_ksrc_files(selft):
+        for filepath in selft.saved_ksrc_files:
+            orig_path = selft.KERNEL_SRC + "/" + filepath
+            saved_path = selft.KERNEL_SRC + "/" + filepath + ".bttw-orig"
+            if not os.path.exists(saved_path):
+                print("Error: backup file handling error for '%s' in restore_ksrc_files()" % filepath)
+                print("backup file '%s' (on saved_src_files list) is not present in filesystem" % saved_path)
+                continue
+
+            shutil.copy(saved_path, orig_path)
+            os.unlink(saved_path)
+            # after restoring this filepath, remove from list
+            selft.saved_ksrc_files.remove(filepath)
+
+        # if there are files left over, something went wrong
+        if selft.saved_ksrc_files:
+            # show a message and some diagnostic info
+            print("Error: backup file handling error in restore_ksrc_files()")
+            print("The following files on the restore list were not restored!!")
+            print("Manually restore files and restart.")
+            print("Search for added printks by grepping 'BTTW'\n")
+            print("Affected files:")
+            for filepath in selft.saved_ksrc_files:
+                orig_path = selft.KERNEL_SRC + filepath
+                print("  " + orig_path)
+            error_out("Aborting now to avoid damage to src tree")
+
+    # location is <file>:<line_expr>
+    # position="before" or "after"
+    def add_printk(selft, region, position, location):
+        printk_str = 'printk(KERN_INFO "BTTW: %s %s\\n");\n' % (position, region)
+        if ":" in location:
+            filepath, expr = location.split(":", 1)
+        else:
+            error_out("Unsupported location '%s' in add_printk" % location)
+
+        # check that file exists
+        full_path = selft.KERNEL_SRC + "/" + filepath
+        if not is_readable_file(filepath):
+            print("Error: could not file file '%s'" % filepath)
+            error_out("Invalid file in location '%s' in add_printk" % location)
+
+        # save a backup of the file
+        selft.save_ksrc_file(filepath)
+
+        # load file
+        lines = open(full_path, "r").readlines()
+        new_lines = []
+        for line in lines:
+            if re.search(expr, line):
+                # got a match, insert the line
+                left_whitespace_len = len(line) - len(line.lstrip())
+                prefix = line[:left_whitespace_len]
+                new_line = prefix + printk_str
+                if position == "before":
+                    new_lines.append(new_line)
+                    new_lines.append(line)
+                else:
+                    new_lines.append(line)
+                    new_lines.append(new_line)
+
+            else:
+                new_lines.append(line)
+
+        content = "".join(new_lines)
+
+        with open(full_path, "w") as outfile:
+            outfile.write(content)
+
+
+    def unapply_patches(selft):
+        patch_list = selft.applied_ksrc_patches
+        # back them out in reverse order
+        patch_list.reverse()
+        for patch_name in patch_list:
+            patch_path = selft.patch_dir + "/" + patch_name
+            cmd ="git apply -R %s" % patch_path
+            status, output = execute(cmd)
+            if status != 0:
+                print("Error: Could not remove patch '%s'" % patch_name)
+                print("output='%s'" % output)
+            else:
+                selft.applied_ksrc_patches.remove(patch_name)
+
+        if selft.applied_ksrc_patches:
+            print("The following files on the restore list were not restored!!")
+            print("Manually restore files and restart.")
+            print("Search for added printks by grepping 'BTTW'\n")
+            print("Outstanding patches:")
+            for patch_name in reversed_patch_list:
+                print("  "+patch_name)
+            error_out("Aborting now to allow manual restoration of src tree")
+
+    def apply_patch(selft, patch_name):
+        # note that this doesn't create commits, which is harder to back out
+        # alternate would be to use git am, but then backing out requires
+        # a git reset, with a ORIG_HEAD that we saved
+        patch_path = selft.patch_dir + "/" + patch_name
+        cmd ="git apply %s" % patch_path
+        status, output = execute(cmd)
+        if status != 0:
+            print("Error: Could not apply patch '%s'" % patch_name)
+            print("output='%s'" % output)
+            print("Instrumentation for test can not be completed")
+            print("Backing out of applied patches now...")
+            if selft.applied_ksrc_patches:
+                selft.unapply_patches()
+            error_out("Aborting now to avoid damage to the src tree")
+        else:
+            selft.applied_ksrc_patches.append(patch_name)
+
+    def add_cmdline(selft, arg):
+        # FIXTHIS - for now, assume cmdline arg can be appended at the end
+        if selft.orig_cmdline and arg not in selft.orig_cmdline:
+            target.ttc("set_cmdline " + arg)
+        return status
+
+    def restore_cmdline(selft):
+        if selft.orig_cmdline:
+            status, output = selft.ttc("set_cmdline -r " + selft.orig_cmdline)
+        return status
 
 def usage():
     print("""Usage: boot-time-tuning-wizard.py <options>
@@ -624,6 +887,14 @@ def init_methods(kernel_dir):
 
         m = cmdline_om_class("low_mem", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
         m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
+
+        # just for sanity, add patches first, then printks, then cmdlines
+        #m.add_instrumentation(("patch","early-times.patch")
+        m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
+        m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
+        #m.add_instrumentation(("cmdline","quiet"))
+        #m.add_instrumentation(("cmdline","log_buf_len=1m"))
+        #m.add_instrumentation(("cmdline","initcall_debug"))
         methods[m.name] = m
 
     dprint("== Methods ==")
@@ -672,6 +943,9 @@ def try_one_method(method, target, artifact_prefix):
     print("##################################################")
     print("== Trying optimization method: %s" % method.name)
 
+    # save off materials we might change
+    method.save_baseline(target)
+
     print("== Preparing target: %s" % target.name)
     vprint(" - Installing grab-boot-data.sh...")
     # find suitable destination directory
@@ -686,9 +960,6 @@ def try_one_method(method, target, artifact_prefix):
 
     # FIXTHIS - should record dest_dir for later cleanup
     target.put(gbd_script_path, dest_dir)
-
-    print("== Instrumenting target: %s, for method %s" % (target.name, method.name))
-    method.instrument_target(target)
 
     vprint(" - Gathering baseline boot data...")
     target.run("chmod a+x %s/grab-boot-data.sh" % dest_dir)
@@ -752,6 +1023,15 @@ def try_one_method(method, target, artifact_prefix):
 
     method.set_results(report_data)
 
+    TRB_wait_for_input("Check running kernel and dmesg for printks")
+
+    # in try_one... we're not accumulating options
+    # reset optimization status
+    method.undo_optimization(target)
+
+    # restore any materials we changed
+    method.restore_baseline(target)
+
     print("== Done with method %s" % method.name)
     return output
 
@@ -761,24 +1041,40 @@ def tune_boot_time(methods, target, artifact_prefix):
     rnd_str = artifact_prefix[-7:-1]
 
     print("Start of boot-time tuning:")
+    print("== Instrumenting target: %s, for method %s" % (target.name, method.name))
+    method.instrument_target(target)
+
+    # FIXTHIS - select methods intelligently, instead of just running through list, in tune_boot_time()
 
     # run through all listed methods
     mlist = list(methods.keys())
-    for m in mlist:
-        # FIXTHIS - advance run_count
-        run_count = int(kernel_id.split("-")[-1]) + 1
+
+    for method in mlist:
+        # advance run_count on each method tested
+        rnd_str, run_count = kernel_id.split("-", 1)
+        run_count = int(run_count) + 1
         kernel_id = "%s-%d" % (rnd_str, run_count)
 
-        # FIXTHIS - select a method
         # try it
-        m.apply_optimization(target, kernel_id)
-
-        # reset and try again
-        dprint("#######################################################")
-        dprint("== Undo Optimization ==")
-        m.undo_optimization(target)
+        try_one_method(method, target, artifact_prefix)
 
         # FIXTHIS - decide if optimization was worth it
+        # check results
+
+    print("== De-Instrumenting target")
+    method.de_instrument_target(target)
+
+    # build to get back to baseline kernel
+    # rebuild kernel
+    print(" - Rebuilding kernel...")
+    status, output = target.ttc("kbuild", verbose)
+
+    # install kernel
+    print(" - Installing kernel...")
+    status, output = target.ttc("kinstall", verbose)
+
+    # reboot one last time to return to baseline kernel and settings
+    target.ttc("reboot")
 
     print("Final tuning recommendations:...")
 
@@ -838,17 +1134,17 @@ def find_gbd_script_path(script_dir):
 
     # try some different alternatives
     script_path = script_dir + "/grab-boot-data.sh"
-    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+    if is_executable_file(script_path):
         gbd_script_path = script_path
         return
 
     script_path = DEFAULT_GBD_SCRIPT_PATH + "/grab-boot-data.sh"
-    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+    if is_executable_file(script_path):
         gbd_script_path = script_path
         return
 
     script_path = ALTERNATE_GBD_SCRIPT_PATH + "/grab-boot-data.sh"
-    if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+    if is_executable_file(script_path):
         gbd_script_path = script_path
         return
 
@@ -950,6 +1246,8 @@ def main():
 
     script_dir = os.path.dirname(sys.argv[0])
 
+    patch_dir = os.path.realpath(script_dir) + "/patches"
+
     # allow error-free piping to other command line utilities (like 'head')
     signal(SIGPIPE, SIG_DFL)
 
@@ -1000,6 +1298,10 @@ def main():
 
     # done parsing command line
     # do more initialization
+
+    # use previously determined patch dir
+    if target:
+        target.patch_dir = patch_dir
 
     # try to auto-detect the kernel source directory
     if not kernel_dir:
@@ -1061,13 +1363,41 @@ def main():
 
     if method:
         method.artifact_prefix = artifact_prefix
-        method.save_baseline(target)
+
+        print("== Instrumenting target: %s, for method '%s'" % (target.name, method.name))
+        method.instrument_target(target)
+
+        vprint("TRB: '%s'" % str(method))
+        vprint("TRB: needs_kbuild=%s" % str(method.needs_kbuild))
+
+        TRB_wait_for_input("In try_one_method: Is kernel instrumented?")
+
+        if method.needs_kbuild:
+            vprint(" - Building and installing with instrumentation...")
+
+            # set kernel name we can check!!
+            status = target.rebuild_and_install("TRBinstrumented")
+            if not status:
+                eprint("Problem rebuilding after instrumentation!")
+
+        TRB_wait_for_input("Is instrumented kernel on the board!!")
 
         try_one_method(method, target, artifact_prefix)
 
-        # reset opt. status when not accumulating them
-        method.restore_baseline(target)
-        method.undo_optimization(target)
+        print("== De-Instrumenting target")
+        method.de_instrument_target(target)
+
+        # build to get back to baseline kernel
+        # rebuild kernel
+        print(" - Rebuilding kernel...")
+        status, output = target.ttc("kbuild", verbose)
+
+        # install kernel
+        print(" - Installing kernel...")
+        status, output = target.ttc("kinstall", verbose)
+
+        # reboot one last time to return to baseline kernel and settings
+        target.ttc("reboot")
 
         # save results to a report file
         rheader = report_header(run_prefix[:-1], target.name, saved_args)
@@ -1078,7 +1408,7 @@ def main():
     else:
         tune_boot_time(methods, target, artifact_prefix)
 
-    # FIXTHIS - should support an option to clean up working files
+    # FIXTHIS - support an option to clean up files (in artifact_dir)
     print("Data files for this run are in '%s' with the prefix '%s'" % (artifact_dir, run_prefix))
 
     # FIXTHIS - need to fully reset target??
