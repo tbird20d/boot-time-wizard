@@ -421,6 +421,9 @@ def parse_systemd_info(req, bd, block):
 # start* = printk indicates start of a region, printk besides 'in' ends region
 # in = printk indicates interior of region, no effect on region state
 # end = printk indicates the end of a region
+
+# match string can be a regular expression, in which case if the reg_name is
+# in int, that group in regex becomes the region name.
 reg_marker_printks = [
     ("rcu: Preemptible hierarchical RCU implementation", "rcu", "kernel/rcu/tree_plugin.h", "start"),
     ("RCU Tasks Trace: Setting shift to", "rcu", "kernel/rcu/tasks.h", "end"),
@@ -430,58 +433,82 @@ reg_marker_printks = [
     ("CPU: All CPU(s) started at EL", "kernel", "arch/arm64/kernel/smp.c", "end"),
     ("Zone ranges:", "mm", "mm/mm_init.c", "start"),
     ("Initmem setup node", "mm", "mm/mm_init.c", "end"),
+    (r"re:BTTW: before (.*)", "1", "unknown", "start"),
+    (r"re:BTTW: after (.*)", "1", "unknown", "end"),
+    (r"re:BTM: before (.*)", "1", "unknown", "start"),
+    (r"re:BTM: after (.*)", "1", "unknown", "end"),
     ]
 
 def record_region(req, bd, line_no, line):
     # maintain a list of regions and their durations
     # try to match printk to a region start or end
     for reg_str, reg_name, source_file, delim_type in reg_marker_printks:
+        match = False
         if reg_str in line:
-            line_time = line_time_to_usecs(line)
-            if delim_type == "start":
-                if reg_name in bd.reg_stack:
-                    # save error if region is already started
-                    bd.parse_errors.append("record_region: reg_name '%s' found nested at line '%s'" % (reg_name, line))
-                else:
-                    # record start time for this region
-                    bd.reg_stack[reg_name] = (line_time, "end", line_no, line)
-                    req.debug_log("DEBUG: adding '%s'(end) to reg_stack: line_time=%s" % (reg_name, line_time))
-                    return
+            match = True;
+        else:
+            if reg_str.startswith("re:"):
+                # try a regex match, and extract name from match
+                regex = reg_str[3:]
+                m = re.search(regex, line)
+                if m:
+                    try:
+                        reg_index = int(reg_name)
+                    except ValueError:
+                        reg_index = 99
 
-            elif delim_type == "start*":
-                if reg_name in bd.reg_stack:
-                    # save error if region is already started
-                    bd.parse_errors.append("reg_name '%s' found nested at line '%s'" % (reg_name, line))
-                else:
-                    # record start time for this region
-                    bd.reg_stack[reg_name] = (line_time, "any", line_no, line)
-                    req.debug_log("DEBUG: adding '%s'(any) to reg_stack: line_time=%s" % (reg_name, line_time))
-                    return
+                    if reg_index != 99:
+                        reg_name = m.group(int(reg_name))
+                        match = True
 
-            elif delim_type == "end":
-                if reg_name not in bd.reg_stack:
-                    bd.parse_errors.append("found end string for region '%s' without matching start, at line '%s'" % (reg_name, line))
-                else:
-                    # remove region from reg_stack
-                    start_time, delim_type, start_line_no, start_line = bd.reg_stack.pop(reg_name)
-                    duration = line_time - start_time
-                    req.debug_log("DEBUG: removing '%s' to reg_stack: line_time=%s" % (reg_name, line_time))
+        if not match:
+            continue
 
-                    # record duration for region
-                    range_t = (start_line_no, start_line, line_no, line)
-                    if reg_name in bd.regions:
-                        bd.regions[reg_name] += duration
-                        bd.reg_list[reg_name].append(range_t)
-                    else:
-                        bd.regions[reg_name] = duration
-                        bd.reg_list[reg_name] = [range_t]
-                    req.debug_log("DEBUG: adding duration %s to region '%s'" % (duration, reg_name))
-            elif delim_type == "in":
-                # save error if we're not in the expected region
-                if reg_name not in bd.reg_stack:
-                    bd.parse_errors.append("found 'in' string outside region '%s', at line '%s'" % (reg_name, line))
+        line_time = line_time_to_usecs(line)
+        if delim_type == "start":
+            if reg_name in bd.reg_stack:
+                # save error if region is already started
+                bd.parse_errors.append("record_region: reg_name '%s' found nested at line '%s'" % (reg_name, line))
             else:
-                bd.parse_errors.append("encountered unknown region delimiter type of '%s'" % delim_type)
+                # record start time for this region
+                bd.reg_stack[reg_name] = (line_time, "end", line_no, line)
+                req.debug_log("DEBUG: adding '%s'(end) to reg_stack: line_time=%s" % (reg_name, line_time))
+                return
+
+        elif delim_type == "start*":
+            if reg_name in bd.reg_stack:
+                # save error if region is already started
+                bd.parse_errors.append("reg_name '%s' found nested at line '%s'" % (reg_name, line))
+            else:
+                # record start time for this region
+                bd.reg_stack[reg_name] = (line_time, "any", line_no, line)
+                req.debug_log("DEBUG: adding '%s'(any) to reg_stack: line_time=%s" % (reg_name, line_time))
+                return
+
+        elif delim_type == "end":
+            if reg_name not in bd.reg_stack:
+                bd.parse_errors.append("found end string for region '%s' without matching start, at line '%s'" % (reg_name, line))
+            else:
+                # remove region from reg_stack
+                start_time, delim_type, start_line_no, start_line = bd.reg_stack.pop(reg_name)
+                duration = line_time - start_time
+                req.debug_log("DEBUG: removing '%s' to reg_stack: line_time=%s" % (reg_name, line_time))
+
+                # record duration for region
+                range_t = (start_line_no, start_line, line_no, line)
+                if reg_name in bd.regions:
+                    bd.regions[reg_name] += duration
+                    bd.reg_list[reg_name].append(range_t)
+                else:
+                    bd.regions[reg_name] = duration
+                    bd.reg_list[reg_name] = [range_t]
+                req.debug_log("DEBUG: adding duration %s to region '%s'" % (duration, reg_name))
+        elif delim_type == "in":
+            # save error if we're not in the expected region
+            if reg_name not in bd.reg_stack:
+                bd.parse_errors.append("found 'in' string outside region '%s', at line '%s'" % (reg_name, line))
+        else:
+            bd.parse_errors.append("encountered unknown region delimiter type of '%s'" % delim_type)
 
     # if no match, but we have open 'start*' regions, end them
     rs_keys = list(bd.reg_stack.keys())
