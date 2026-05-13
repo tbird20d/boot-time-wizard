@@ -12,6 +12,7 @@
 # etc. can be correlated with the duration of specific boot operations
 #
 # Changelog:
+#  Version 1.6 - add MODULES section, with lsmod command
 #  Version 1.5 - add timestamp to GBD section, move systemd section higher
 #                handle missing 'sudo'
 #  Version 1.4 - add systemd info section
@@ -20,7 +21,7 @@
 #  Version 1.1 - fix shellcheck issues, change SKIP_ vars to DO_ vars
 #  Version 1.0 - first release
 
-VERSION="1.5"
+VERSION="1.6"
 
 # for testing
 #UPLOAD_URL="http://localhost:8000/cgi-bin/tbwiki.cgi/Boot_Data?action=do_upload"
@@ -260,6 +261,7 @@ if [ -n "$DO_GRAB" ] ; then
     echo "KERNEL_CMDLINE=\"$CMDLINE\"" >>"$OUTPATH"
     echo >>"$OUTPATH"
 
+    out_section MODULES "lsmod"
     out_section OS "get_distro"
     out_section MEMORY "free"
     out_section "DISK USAGE" "df -h"

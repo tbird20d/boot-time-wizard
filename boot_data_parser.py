@@ -131,6 +131,7 @@ class boot_data_class:
         self.time_to_init = 999999
         self.CONFIGS = {}
         self.ARCH = "unknown"
+        self.modules = {}
         self.parse_errors = []
         # this includes global values (SYSTEMD_...) and unit durations
         self.systemd_items = {}
@@ -373,6 +374,19 @@ def parse_os(req, bd, block):
 
     return
 
+def parse_modules(req, bd, block):
+    #req.add_to_message("block='%s'" % block)
+    for line in block:
+        if line.startswith("Module "):
+            continue
+        if not line.strip():
+            continue
+        name, size, used_by = line.split(None, 2)
+        bd.modules[name] = (size, used_by)
+
+    return
+
+
 def parse_systemd_info(req, bd, block):
     #req.add_to_message("block='%s'" % block)
 
@@ -570,6 +584,8 @@ def parse_boot_data(req, filepath):
                 parse_os(req, bd, block)
             elif section == "CONFIG":
                 bd.CONFIG = block
+            elif section == "MODULES":
+                parse_modules(req, bd, block)
             elif section == "SYSTEMD INFO":
                 parse_systemd_info(req, bd, block)
 
