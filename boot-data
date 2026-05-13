@@ -875,11 +875,103 @@ def diff_ext(bd1, bd2, desc1, desc2, sec_name, ext_tool="diff -u"):
 
     return output
 
-def diff_process(bd1, bd2, desc1, desc2):
+def diff_processes(bd1, bd2, desc1, desc2):
     lines1, lines2 = get_lines_1_2(bd1, bd2, "PROCESSES")
 
-    output = "FIXTHIS - need to finish diff_process()"
+    output = "FIXTHIS - need to finish diff_processes()"
     return output
+
+def diff_modules(bd1, bd2, desc1, desc2):
+    #sec_name = "MODULES"
+
+    output = ""
+    mod1_names = list(bd1.modules.keys())
+    if not mod1_names:
+        output += "Warning: Missing data for MODULES section in file1\n"
+    mod1_names.sort()
+    # avoid index errors
+
+    mod2_names = list(bd2.modules.keys())
+    if not mod2_names:
+        output += "Warning: Missing data for MODULES section in file2\n"
+    mod2_names.sort()
+
+    # if no data, don't show an empty table
+    if (not mod1_names) and (not mod2_names):
+        return output
+
+    mod1_names.append("zzz**end**")
+    mod2_names.append("zzz**end**")
+
+    # gather data, then sort and display it (by longest duration?)
+    # pick from one list, then the other, according to merge order
+    i = 0
+    j = 0
+    output_tuples = []
+    while i < len(mod1_names)-1 and j < len(mod2_names)-1:
+        name1 = mod1_names[i]
+        name2 = mod2_names[j]
+        #print(f"{i=},{j=},{name1=},{name2=}")
+        if name1 < name2:
+            name = name1
+            i += 1
+            tuple1 = bd1.modules[name]
+            if name in bd2.modules:
+                tuple2 = bd2.modules[name]
+            else:
+                tuple2 = None
+
+        if name1 == name2:
+            name = name1
+            i += 1
+            j += 1
+            tuple1 = bd1.modules[name]
+            if name in bd2.modules:
+                tuple2 = bd2.modules[name]
+            else:
+                tuple2 = None
+
+        if name1 > name2:
+            name = name2
+            j += 1
+            tuple2 = bd2.modules[name]
+            if name in bd1.modules:
+                tuple1 = bd1.modules[name]
+            else:
+                tuple1 = 0
+
+        output_tuples.append((name, tuple1, tuple2))
+
+    data = sorted(output_tuples, key=itemgetter(0))
+
+    output += " Module                          Size              Used by\n"
+    output += " =============================== =======           =======\n"
+    for name, t1, t2 in data:
+        if t1 and not t2:
+            size1, usedby1 = t1
+            output += "-%-30s %7s            %s" % (name, size1, usedby1)
+
+        if not t1 and t2:
+            size2, usedby2 = t2
+            output += "+%-30s          %7s   %s" % (name, size2, usedby2)
+
+        if t1 and t2:
+            size1, usedby1 = t1
+            size2, usedby2 = t2
+            if size1 == size2:
+                size_str = "%7s" % size1
+            else:
+                size_str = "%7s -> %s" % (size1, size2)
+            if usedby1 == usedby2:
+                usedby_str = usedby1
+            else:
+                usedby_str = "%s -> %s" % (usedby1, usedby2)
+            output += " %-30s %-18s %s" % (name, size_str, usedby_str)
+
+        output += "\n"
+
+    return output
+
 
 def diff_config(bd1, bd2, desc1, desc2):
     #sec_name = "CONFIG"
@@ -1171,7 +1263,8 @@ section_prefs = {"uptime": ("UPTIME", "text"),
                  "mem": ("MEMORY", "diff_mem"),
                  "disk": ("DISK USAGE", "text"),
                  "mounts": ("MOUNTS", "text"),
-                 "processes": ("PROCESSES", "diff_process"),
+                 "modules": ("MODULES", "diff_modules"),
+                 "processes": ("PROCESSES", "diff_processes"),
                  "cores": ("CORES", "text"),
                  "config": ("CONFIG", "diff_config"),
                  "systemd": ("SYSTEMD INFO", "diff_systemd"),
@@ -1223,12 +1316,15 @@ def do_diff(file1, file2, options):
         pref = section_prefs[section]
         sec_name = pref[0]
         diff_method = pref[1]
+        title_extra = ""
         if diff_method == "text":
             output = diff_ext(bd1, bd2, desc1, desc2, sec_name, "diff -u")
         elif diff_method == "diff_mem":
             output = diff_mem(bd1, bd2, desc1, desc2)
-        elif diff_method == "diff_process":
-            output = diff_process(bd1, bd2, desc1, desc2)
+        elif diff_method == "diff_processes":
+            output = diff_processes(bd1, bd2, desc1, desc2)
+        elif diff_method == "diff_modules":
+            output = diff_modules(bd1, bd2, desc1, desc2)
         elif diff_method == "diff_config":
             output = diff_config(bd1, bd2, desc1, desc2)
         elif diff_method == "diff_systemd":
@@ -1237,12 +1333,14 @@ def do_diff(file1, file2, options):
             output = diff_kmsg(bd1, bd2, desc1, desc2)
         elif diff_method == "diff_initcalls":
             output = diff_initcalls(bd1, bd2, desc1, desc2)
+            title_extra = "data in "
         elif diff_method == "diff_regions":
             output = diff_regions(bd1, bd2, desc1, desc2)
+            title_extra = "data in "
         else:
             wprint("FIXTHIS - diff_method '%s' for section '%s' is not implemented" % (diff_method, section))
 
-        print("== diff for section %s ==" % sec_name)
+        print("== diff for %ssection %s ==" % (title_extra, sec_name))
         print(output)
         print()
 
@@ -1297,6 +1395,7 @@ def main():
     duration_threshold = 10000
     max_count = 10
     file_match_str = ""
+    cmd = ""
 
     if "-h" in sys.argv or "--help" in sys.argv:
         usage()
@@ -1382,6 +1481,9 @@ def main():
     # sanity check some args
     if file1 and not is_readable_file(file1):
         error_out("Missing or invalid boot-data file: %s" % file1)
+
+    if not cmd:
+        error_out("Missing command (use -h for help)")
 
     if cmd in ["compare", "diff"] and not file2:
         error_out("Missing second boot-data file argument\n  (use -f to specify, and -h for help)")
