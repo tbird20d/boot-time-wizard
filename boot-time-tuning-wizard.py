@@ -7,15 +7,18 @@
 #     for a platform
 #
 # todo:
-# - manage method.needs_kbuild and
+# - test looping
+#   - does kernel_id (run portion) increment correctly?
+#   - does source, cmdline, config get restored correctly?
+# - manage method.needs_kbuild
 # - hide stderr from builds, if requested (default opt-in to build messages)
 #   - or show if requested (default opt-out to build messages)
 # - detect build failures
 # - handle different optimization methods:
-#   - change command line setting
+#   + change kernel config
+#   + change command line setting
 #     + add low_mem
-#     - add deferred initcalls
-#   - remove devicetree entries
+#   + disable devicetree entries
 #   - remove udev entries
 #   - remove SELinux rules
 # - during test, check that system still behaves properly
@@ -115,14 +118,14 @@ def vprint(msg):
 def TRB_wait_for_input(msg):
     return(input("%s: continue? " % msg))
 
-def is_readable_file(path):
+def is_readable_file(filepath):
     real_path = os.path.realpath(filepath)
     if not os.path.isfile(real_path):
         return False
     return os.access(real_path, os.R_OK)
 
 
-def is_executable_file(path):
+def is_executable_file(filepath):
     real_path = os.path.realpath(filepath)
     if not os.path.isfile(real_path):
         return False
@@ -206,7 +209,7 @@ class opt_method_class():
                 instr_type = instr_tuple[0]
                 instr_data = instr_tuple[1:]
                 if instr_type == "patch":
-                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    dprint("Doing instrumentation: '%s'" % str(instr_tuple))
                     target.apply_patch(instr_data[0])
                     selfm.needs_kbuild = True
                 elif instr_type in ["printk", "cmdline"]:
@@ -219,21 +222,18 @@ class opt_method_class():
                 instr_type = instr_tuple[0]
                 instr_data = instr_tuple[1:]
                 if instr_type == "printk":
-                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    dprint("Doing instrumentation: '%s'" % str(instr_tuple))
                     # instr_data should be a 3-tuple here
                     target.add_printk(*instr_data)
                     selfm.needs_kbuild = True
                 elif instr_type == "cmdline":
-                    vprint("TRB: Doing instrumentation: '%s'" % str(instr_tuple))
+                    dprint("Doing instrumentation: '%s'" % str(instr_tuple))
                     target.add_cmdline(instr_data[0])
         else:
             print("No instrumentation added.")
 
-        vprint("TRB: '%s'" % str(selfm))
-        vprint("TRB: needs_kbuild=%s" % str(selfm.needs_kbuild))
-
         # wait for input (to investigate what happened)
-        TRB_wait_for_input("Check instrumentation")
+        #TRB_wait_for_input("Check instrumentation, then press enter>")
 
         target.change_to_start_dir()
 
@@ -304,14 +304,16 @@ class config_om_class(opt_method_class):
         # report whether this optimization is already applied
         # check config, return a string
         configs = target.get_target_configs()
+        config_name = selfcm.config_name
+        config_value = selfcm.config_value
 
-        if selfcm.config_name not in configs:
-            return (False, "config %s not found")
+        if config_name not in configs:
+            return (False, "config %s not found" % config_name)
 
-        if configs[selfcm.config_name] == selfcm.config_value:
-            return (True, "config %s has the value %s" % selfcm.config_name, selfcm.config_value)
+        if configs[config_name] == config_value:
+            return (True, "config %s has the value %s" % config_name, config_value)
         else:
-            return (False, "config %s: current value of %s does not match desired value of %s" % (selfcm.config_name, configs[selfcm.config_name], selfcm.config_value))
+            return (False, "config %s: current value of %s does not match desired value of %s" % (config_name, configs[config_name], config_value))
 
     def apply_optimization(selfcm, target, kernel_id):
         target.change_to_src_dir()
@@ -339,21 +341,10 @@ class config_om_class(opt_method_class):
 
         selfcm.saved_value = old_build_value
 
-        # set kernel id
-        target.set_localversion(kernel_id)
+        # set kernel id, then build
+        status = target.rebuild_and_install(kernel_id)
 
-        # rebuild kernel
-        print(" - Rebuilding kernel...")
-        status, output = target.ttc("kbuild", verbose)
-
-        # install kernel
-        print(" - Installing kernel...")
-        status, output = target.ttc("kinstall", verbose)
-
-        # reset working dir to where we started
-        target.change_to_start_dir()
-
-        return status, output
+        return status
 
     def undo_optimization(selfcm, target):
         target.change_to_src_dir()
@@ -371,6 +362,7 @@ class config_om_class(opt_method_class):
         # reset working dir to where we started
         target.change_to_start_dir()
         return
+
 
 # the optimization method class for kernel command line options
 class cmdline_om_class(opt_method_class):
@@ -414,11 +406,73 @@ class cmdline_om_class(opt_method_class):
         selflm.saved_cmdline = cmdline
 
         # FIXTHIS - for now, assume optimization option can be appended at the end of cmdline
-        target.ttc("set_cmdline " + selflm.option_str)
+        status, output = target.ttc("set_cmdline " + selflm.option_str)
         return status
 
     def undo_optimization(selflm, target):
-        status, cmdline = target.ttc("set_cmdline -r" + selflm.saved_cmdline)
+        status, cmdline = target.ttc("set_cmdline -r " + selflm.saved_cmdline)
+        if status != 0:
+             eprint("Could not set current configured command line")
+        return
+
+# the optimization method class for trimming device tree items
+class dt_om_class(opt_method_class):
+    def __init__(selfdtm, name, description, dt_name):
+        super().__init__(name, description, "dt_disable")
+        selfdtm.dt_name = dt_name
+        selfdtm.needs_kbuild = True
+
+    def save_baseline(selfdtm, target):
+        # save the current (configured) target cmdline
+        status, cur_cmdline = target.ttc("get_cmdline")
+        saved_cmdline_path = selfdtm.artifact_prefix + "dt_saved_cmdline.txt"
+        with open(saved_cmdline_path, "w") as fd:
+                  fd.write(cur_cmdline)
+        return
+
+    def restore_baseline(selfdtm, target):
+        saved_cmdline_path = selfdtm.artifact_prefix + "dt_saved_cmdline.txt"
+        cmdline = open(saved_cmdline_path, "r").read().rstrip()
+        status, output = target.ttc("set_cmdline -r " + cmdline)
+
+    def detect_optimization(selfdtm, target):
+        # report whether this optimization is already applied
+        # check config, return a string
+        dts = target.get_dts_status()
+        dprint(f"in detect_optimization: {dts=}")
+
+        dt_name = selfdtm.dt_name
+
+        # make sure dt_om_class::detect_optimization works
+        if dt_name not in dts:
+            return (False, "device-tree node '%s' not found" % dt_name)
+        status = dts[dt_name]
+
+        if status == "disabled":
+            return (True, "device-tree node '%s' is already disabled" % dt_name)
+        else:
+            return (False, "device-tree node '%s': current status of '%s' does not match desired status 'disabled'" % (dt_name, status))
+
+    def apply_optimization(selfdtm, target, kernel_id):
+        # check if config is different from requested value
+        dts = target.get_dts_status()
+        dt_name = selfdtm.dt_name
+
+        # disable the dt
+        dt_disable_str="fdt.disable=%s" % dt_name
+        print(" - Applying optimization: changing dt %s status to 'disabled'" % dt_name)
+        status, cmdline = target.ttc("get_cmdline")
+        if status != 0:
+             eprint("Could not get current configured command line")
+
+        selfdtm.saved_cmdline = cmdline
+
+        # optimization option can be appended at the end of cmdline
+        status, output = target.ttc("set_cmdline " + dt_disable_str)
+        return status
+
+    def undo_optimization(selfdtm, target):
+        status, cmdline = target.ttc("set_cmdline -r " + selfdtm.saved_cmdline)
         if status != 0:
              eprint("Could not set current configured command line")
         return
@@ -464,7 +518,6 @@ class target_class():
         if status != 0:
              eprint("Could not get (original) current configured command line")
         selft.orig_cmdline = cmdline
-        print("TRB: orig_cmdline=%s" % cmdline)
 
     # return the output from 'ttc target cmd'
     def ttc(selft, cmd, echo=False):
@@ -627,8 +680,7 @@ class target_class():
         return selft.ttc(cmd, verbose)
 
     def set_localversion(selft, lver_str):
-        # we should be in the KERNEL_SRC dir by now
-        lv_path = "localversion"
+        lv_path = selft.KERNEL_SRC + "/localversion"
         lv_file = open(lv_path, "w")
         lv_file.write("-" + lver_str + "\n")
         lv_file.close()
@@ -636,7 +688,7 @@ class target_class():
 
     def clear_localversion(selft):
         # we should be in the KERNEL_SRC dir by now
-        lv_path = "localversion"
+        lv_path = selft.KERNEL_SRC + "/localversion"
         try:
             os.unlink(lv_path)
         except:
@@ -653,11 +705,11 @@ class target_class():
 
     def rebuild_and_install(selft, localversion=""):
         # NOTE: if you pass a localversion, any preset localversion
-        # will be cleared this function returns.
+        # will be cleared when this function returns.
         selft.change_to_src_dir()
 
         if localversion:
-            self.set_localversion(localversion)
+            selft.set_localversion(localversion)
 
         status, output = selft.ttc("kbuild", verbose)
         if status != 0:
@@ -670,7 +722,7 @@ class target_class():
             return status
 
         if localversion:
-            target.clear_localversion()
+            selft.clear_localversion()
 
         selft.change_to_start_dir()
         return 0
@@ -775,7 +827,8 @@ class target_class():
 
 
     def unapply_patches(selft):
-        patch_list = selft.applied_ksrc_patches
+        # get a new list, since we'll modify the old one
+        patch_list = selft.applied_ksrc_patches.copy()
         # back them out in reverse order
         patch_list.reverse()
         for patch_name in patch_list:
@@ -789,12 +842,12 @@ class target_class():
                 selft.applied_ksrc_patches.remove(patch_name)
 
         if selft.applied_ksrc_patches:
-            print("The following files on the restore list were not restored!!")
-            print("Manually restore files and restart.")
-            print("Search for added printks by grepping 'BTTW'\n")
+            print("The following patches were not removed!!\n")
             print("Outstanding patches:")
-            for patch_name in reversed_patch_list:
+            for patch_name in selft.applied_ksrc_patches:
                 print("  "+patch_name)
+            print("\nManually unapply patches (git apply -R), or reset tree.")
+            print("Try: git reset --hard <good-top-commit>'\n")
             error_out("Aborting now to allow manual restoration of src tree")
 
     def apply_patch(selft, patch_name):
@@ -807,7 +860,7 @@ class target_class():
         if status != 0:
             print("Error: Could not apply patch '%s'" % patch_name)
             print("output='%s'" % output)
-            print("Instrumentation for test can not be completed")
+            print("Instrumentation for test cannot be completed")
             print("Backing out of applied patches now...")
             if selft.applied_ksrc_patches:
                 selft.unapply_patches()
@@ -816,15 +869,39 @@ class target_class():
             selft.applied_ksrc_patches.append(patch_name)
 
     def add_cmdline(selft, arg):
-        # FIXTHIS - for now, assume cmdline arg can be appended at the end
-        if selft.orig_cmdline and arg not in selft.orig_cmdline:
-            target.ttc("set_cmdline " + arg)
+        # assume cmdline arg can be appended at the end
+        status = 0
+        if selft.orig_cmdline:
+            if arg not in selft.orig_cmdline:
+                status, output = selft.ttc("set_cmdline " + arg)
+        else:
+            wprint("orig_cmdline not set!")
         return status
 
     def restore_cmdline(selft):
+        status = 0
         if selft.orig_cmdline:
             status, output = selft.ttc("set_cmdline -r " + selft.orig_cmdline)
+        else:
+            wprint("orig_cmdline not set!")
         return status
+
+    def get_dts_status(selft):
+        # return a dictionary of dts with key=name, value=status
+        dt_status_script = '"for sp in /proc/device-tree/aliases/* ; do s=\\$(basename \\$sp) ; dtp=\\$(cat \\$sp | tr -d \'\\0\') ; p=/proc/device-tree\\${dtp} ; st=\\${p}/status ; if [ -e \\$st ] ; then status=\\$(cat \\$st | tr -d \'\\0\') ; echo \\$s,\\$status ; fi ; done"'
+        status, output = selft.run(dt_status_script)
+        lines = output.split("\n")
+        dprint(f"\nin get_target_dts_status: result from dt_status_script {lines=}")
+
+        # parse output
+        dts = {}
+        for line in lines:
+            if "," in line:
+                dt, status = line.strip().split(",",1)
+                dts[dt] = status
+
+        return dts
+
 
 def usage():
     print("""Usage: boot-time-tuning-wizard.py <options>
@@ -868,29 +945,43 @@ def init_methods(kernel_dir):
     # initialize optimization methods that require modifying or
     # reconfiguring the kernel
     if kernel_dir:
-        m = config_om_class("disable_bluetooth", "Disable bluetooth by compiling kernel without it.", "CONFIG_BT", "N")
+        m = config_om_class("disable-bluetooth-config", "Disable bluetooth by compiling kernel without it.", "CONFIG_BT", "N")
         m.compare_list = ["CONFIG_BT", "bt_init", "bluetooth.service"]
+        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
         methods[m.name] = m
 
-        m = config_om_class("disable_sound", "Disable sound by compiling kernel without it.", "CONFIG_SOUND", "N")
+        m = config_om_class("disable-sound-config", "Disable sound by compiling kernel without it.", "CONFIG_SOUND", "N")
         m.compare_list = ["CONFIG_SOUND", "alsa_pcm_init", "alsa_sound_init", "alsa_timer_init", "init_soundcore", "systemd-modules-load.service"]
+        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
         methods[m.name] = m
 
-        m = config_om_class("disable_graphics", "Disable graphics by compiling kernel without it.", "CONFIG_DRM", "N")
+        m = config_om_class("disable-graphics-config", "Disable graphics by compiling kernel without it.", "CONFIG_DRM", "N")
         m.compare_list = ["CONFIG_DRM"]
+        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
         methods[m.name] = m
 
-        m = cmdline_om_class("low_mem", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
-        m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
+    m = cmdline_om_class("low-mem-cmdline", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
+    m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
 
-        # just for sanity, add patches first, then printks, then cmdlines
-        #m.add_instrumentation(("patch","early-times.patch")
-        m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
-        m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
-        #m.add_instrumentation(("cmdline","quiet"))
-        #m.add_instrumentation(("cmdline","log_buf_len=1m"))
-        #m.add_instrumentation(("cmdline","initcall_debug"))
-        methods[m.name] = m
+    # FIXTHIS - these instrumentations should be generally applied
+    m.add_instrumentation(("patch","early-times.patch"))
+    #m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
+    #m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
+    m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+    methods[m.name] = m
+
+    m = dt_om_class("disable-bluetooth-dt", "Disable bluetooth device-tree node.", "bluetooth")
+
+    # add patches first, then printks, then cmdlines
+    m.add_instrumentation(("patch","cmdline-disable-dt1.patch"))
+    m.add_instrumentation(("patch","cmdline-disable-dt2.patch"))
+    m.add_instrumentation(("patch","cmdline-disable-dt3.patch"))
+
+    #m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
+    #m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
+
+    m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+    methods[m.name] = m
 
     dprint("== Methods ==")
     dprint(methods)
@@ -954,7 +1045,10 @@ def try_one_method(method, target, artifact_prefix):
             dest_dir = "/bin"
 
     # FIXTHIS - should record dest_dir for later cleanup
-    target.put(gbd_script_path, dest_dir)
+    # this may overwrite an existing grab-boot-data.sh script
+    dprint(f"in try_one_method: {gbd_script_path=}, {dest_dir=}")
+    status, output = target.put(gbd_script_path, dest_dir)
+    # FIXTHIS - check status here??
 
     vprint(" - Gathering baseline boot data...")
     target.run("chmod a+x %s/grab-boot-data.sh" % dest_dir)
@@ -1018,7 +1112,7 @@ def try_one_method(method, target, artifact_prefix):
 
     method.set_results(report_data)
 
-    TRB_wait_for_input("Check running kernel and dmesg for printks")
+    #TRB_wait_for_input("Check running kernel and dmesg for printks")
 
     # in try_one... we're not accumulating options
     # reset optimization status
@@ -1061,12 +1155,9 @@ def tune_boot_time(methods, target, artifact_prefix):
 
     # build to get back to baseline kernel
     # rebuild kernel
-    print(" - Rebuilding kernel...")
-    status, output = target.ttc("kbuild", verbose)
-
-    # install kernel
-    print(" - Installing kernel...")
-    status, output = target.ttc("kinstall", verbose)
+    vprint(" - Rebuilding and installing kernel...")
+    target.clear_localversion()
+    status = target.rebuild_and_install()
 
     # reboot one last time to return to baseline kernel and settings
     target.ttc("reboot")
@@ -1239,9 +1330,9 @@ def main():
 
     saved_args = sys.argv[1:]
 
-    script_dir = os.path.dirname(sys.argv[0])
-
-    patch_dir = os.path.realpath(script_dir) + "/patches"
+    script_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
+    patch_dir = script_dir + "/patches"
+    find_gbd_script_path(script_dir)
 
     # allow error-free piping to other command line utilities (like 'head')
     signal(SIGPIPE, SIG_DFL)
@@ -1300,7 +1391,6 @@ def main():
 
     # try to auto-detect the kernel source directory
     if not kernel_dir:
-        wprint("No kernel source dir specified.")
         # try to find one
         if os.path.isfile("MAINTAINERS"):
             kernel_dir = "."
@@ -1308,6 +1398,8 @@ def main():
             kernel_dir = "linux"
         if kernel_dir:
             print("Using '%s' as the kernel source dir" % kernel_dir)
+        else:
+            error_out("No kernel source dir specified.")
 
     methods = init_methods(kernel_dir)
 
@@ -1362,34 +1454,26 @@ def main():
         print("== Instrumenting target: %s, for method '%s'" % (target.name, method.name))
         method.instrument_target(target)
 
-        vprint("TRB: '%s'" % str(method))
-        vprint("TRB: needs_kbuild=%s" % str(method.needs_kbuild))
-
-        TRB_wait_for_input("In try_one_method: Is kernel instrumented?")
-
         if method.needs_kbuild:
             vprint(" - Building and installing with instrumentation...")
 
             # set kernel name we can check!!
-            status = target.rebuild_and_install("TRBinstrumented")
+            status = target.rebuild_and_install("bttw-instr")
             if not status:
                 eprint("Problem rebuilding after instrumentation!")
 
-        TRB_wait_for_input("Is instrumented kernel on the board!!")
+        #TRB_wait_for_input("Is instrumented kernel on the board!!")
 
         try_one_method(method, target, artifact_prefix)
 
         print("== De-Instrumenting target")
         method.de_instrument_target(target)
 
-        # build to get back to baseline kernel
+        # get back to baseline (previous) kernel
         # rebuild kernel
-        print(" - Rebuilding kernel...")
-        status, output = target.ttc("kbuild", verbose)
-
-        # install kernel
-        print(" - Installing kernel...")
-        status, output = target.ttc("kinstall", verbose)
+        target.clear_localversion()
+        print(" - Rebuilding and installing kernel...")
+        status = target.rebuild_and_install("kbuild")
 
         # reboot one last time to return to baseline kernel and settings
         target.ttc("reboot")
