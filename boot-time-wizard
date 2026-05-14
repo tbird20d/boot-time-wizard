@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # vim: set ts=4 sw=4 et :
 #
-# boot-time-tuning-wizard.py
+# boot-time-wizard.py
 #   Run a series of measurements and tests, to try to optimize boot-time
 #     for a platform
 #
@@ -729,7 +729,7 @@ class target_class():
 
     def save_ksrc_file(selft, filepath):
         orig_path = selft.KERNEL_SRC + "/" + filepath
-        save_path = selft.KERNEL_SRC + "/" + filepath + ".bttw-orig"
+        save_path = selft.KERNEL_SRC + "/" + filepath + ".btw-orig"
 
         # check if we've already saved it
         if filepath in selft.saved_ksrc_files:
@@ -759,7 +759,7 @@ class target_class():
     def restore_ksrc_files(selft):
         for filepath in selft.saved_ksrc_files:
             orig_path = selft.KERNEL_SRC + "/" + filepath
-            saved_path = selft.KERNEL_SRC + "/" + filepath + ".bttw-orig"
+            saved_path = selft.KERNEL_SRC + "/" + filepath + ".btw-orig"
             if not os.path.exists(saved_path):
                 print("Error: backup file handling error for '%s' in restore_ksrc_files()" % filepath)
                 print("backup file '%s' (on saved_src_files list) is not present in filesystem" % saved_path)
@@ -904,7 +904,7 @@ class target_class():
 
 
 def usage():
-    print("""Usage: boot-time-tuning-wizard.py <options>
+    print("""Usage: boot-time-wizard.py <options>
 
 Run one or more optimization methods on a specified target, and
 see how it affects the boot-time for the target.  Produce a report
@@ -917,7 +917,7 @@ Options:
  -l            List optimization methods
  -t <target>   Specify the target to run tests on
  -d <dir>      Use <dir> for artifacts and test results
-               (default is the './bttw-artifacts')
+               (default is the './btw-artifacts')
  -k <kernel_dir> Use <kernel_dir> as the kernel source directory.
                This is required by some optimization methods.  If not
                specified, the code will see if the current directory or
@@ -1129,7 +1129,7 @@ def tune_boot_time(methods, target, artifact_prefix):
 
     rnd_str = artifact_prefix[-7:-1]
 
-    print("Start of boot-time tuning:")
+    print("Start of boot-time testing:")
     print("== Instrumenting target: %s, for method %s" % (target.name, method.name))
     method.instrument_target(target)
 
@@ -1173,7 +1173,7 @@ def report_header(run_id, tname, saved_args):
 
     now = datetime.now()
     time_str = now.strftime("%Y-%02m-%02d_%02H:%02M:%02S")
-    header = """Boot-Time Tuning Wizard Report
+    header = """Boot-Time Wizard Report
 ==========================================
 DATE_AND_TIME="%s"
 RUN_ID="%s"
@@ -1417,7 +1417,7 @@ def main():
 
     # if no artifact-dir specified, create one in .
     if not artifact_dir:
-        artifact_dir = "bttw-artifacts"
+        artifact_dir = "btw-artifacts"
         try:
             os.mkdir(artifact_dir)
             artifact_dir_created = True
@@ -1458,7 +1458,7 @@ def main():
             vprint(" - Building and installing with instrumentation...")
 
             # set kernel name we can check!!
-            status = target.rebuild_and_install("bttw-instr")
+            status = target.rebuild_and_install("btw-instr")
             if not status:
                 eprint("Problem rebuilding after instrumentation!")
 
