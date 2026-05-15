@@ -377,13 +377,13 @@ class cmdline_om_class(opt_method_class):
     def save_baseline(selflm, target):
         # save the current (configured) target cmdline
         status, cur_cmdline = target.ttc("get_cmdline")
-        saved_cmdline_path = selflm.artifact_prefix + "saved_cmdline.txt"
+        saved_cmdline_path = target.artifact_prefix + "saved_cmdline.txt"
         with open(saved_cmdline_path, "w") as fd:
                   fd.write(cur_cmdline)
         return
 
     def restore_baseline(selflm, target):
-        saved_cmdline_path = selflm.artifact_prefix + "saved_cmdline.txt"
+        saved_cmdline_path = target.artifact_prefix + "saved_cmdline.txt"
         cmdline = open(saved_cmdline_path, "r").read().rstrip()
         status, output = target.ttc("set_cmdline -r " + cmdline)
 
@@ -426,13 +426,13 @@ class dt_om_class(opt_method_class):
     def save_baseline(selfdtm, target):
         # save the current (configured) target cmdline
         status, cur_cmdline = target.ttc("get_cmdline")
-        saved_cmdline_path = selfdtm.artifact_prefix + "dt_saved_cmdline.txt"
+        saved_cmdline_path = target.artifact_prefix + "dt_saved_cmdline.txt"
         with open(saved_cmdline_path, "w") as fd:
                   fd.write(cur_cmdline)
         return
 
     def restore_baseline(selfdtm, target):
-        saved_cmdline_path = selfdtm.artifact_prefix + "dt_saved_cmdline.txt"
+        saved_cmdline_path = target.artifact_prefix + "dt_saved_cmdline.txt"
         cmdline = open(saved_cmdline_path, "r").read().rstrip()
         status, output = target.ttc("set_cmdline -r " + cmdline)
 
@@ -652,7 +652,7 @@ class target_class():
 
         return value
 
-    def save_build_config(selft, artifact_prefix):
+    def save_build_config(selft):
         if not selft.config_saved:
             # put original build configs into artifact dir
             config_path = selft.KBUILD_OUTPUT + "/.config"
@@ -661,7 +661,7 @@ class target_class():
             shutil.copy(config_path, save_path)
             selft.config_saved = True
 
-    def restore_build_config(selft, artifact_prefix):
+    def restore_build_config(selft):
         if not selft.config_saved:
             eprint("Error restoring build config - original config was not saved!")
             return
@@ -1467,7 +1467,8 @@ def main():
         generate_report(report_run_id, method, target, artifact_dir, saved_args)
 
     if method:
-        method.artifact_prefix = artifact_prefix
+        # near as I can tell, this is never used (use the one on the 'target' instead')
+        #method.artifact_prefix = artifact_prefix
 
         print("== Instrumenting target: %s, for method '%s'" % (target.name, method.name))
         method.instrument_target(target)
