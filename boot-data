@@ -618,7 +618,12 @@ def kmsg_show_line(kline1, kline2, index_delta, ts_delta, reason):
 
     dmsg = ""
     delta1 = abs(float(kline1.delta) / 1000000)
-    kline1_str = f"[{kline1.ts_str}] <{delta1:9.6f}> {kline1.rest}"
+    msg = kline1.rest
+    # truncate msg to a fixed width
+    MSG_WIDTH = 72
+    if len(msg) > MSG_WIDTH:
+        msg = msg[:MSG_WIDTH-2]+".."
+    kline1_str = f"[{kline1.ts_str}] <{delta1:9.6f}> {msg}"
     dmsg += f"   {kline1.match_str=}\n"
     dmsg += "   line1 duration = %d\n" % kline1.duration
     dmsg += "   line1 delta = %d\n" % kline1.delta
@@ -743,7 +748,11 @@ def diff_kmsg(bd1, bd2, desc1, desc2):
             if kline2.timestamp >= last_k2_timestamp:
                 # format a '+' line with no k1 timestamp or delta data
                 delta2 = abs(float(kline2.delta) / 1000000)
-                part1 = f"                           {kline2.rest}"
+                msg = kline2.rest
+                MSG_WIDTH=72
+                if len(msg) > MSG_WIDTH:
+                    msg = msg[:MSG_WIDTH-2]+".."
+                part1 = f"                           {msg}"
                 pad = " " * max(100 - len(part1), 1)
                 part2 = f"{pad}[{kline2.ts_str}] <{delta2:9.6f}> d=n/a\n"
                 out_str = "+" + part1 + part2
