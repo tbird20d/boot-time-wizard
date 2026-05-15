@@ -1,0 +1,136 @@
+From 49ed953d03aaaa4e708b1f26864a5d3f6f4d1e74 Mon Sep 17 00:00:00 2001
+From: Dong Aisheng <b29396@freescale.com>
+Date: Thu, 15 Aug 2013 18:55:32 +0800
+Subject: [PATCH 2/3] of: add update device node status via cmdline feature
+
+Some boards may have a lot of pin conflicts between different devices,
+only one of them can be enabled to run at one time.
+Instead of changing dts manually or adding a lot dts files according to
+different device availability, we provide feature to dynamically update the
+device node status via command line, then those devices involved with
+pin conflict can be enabled or disabled dynamically.
+
+Signed-off-by: Dong Aisheng <b29396@freescale.com>
+---
+ .../admin-guide/kernel-parameters.txt         | 10 +++
+ drivers/of/fdt.c                              | 69 +++++++++++++++++++
+ 2 files changed, 79 insertions(+)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 03a550630644..f3a4d6588694 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -93,6 +93,7 @@ In addition, the following text indicates that the option
+ 	BOOT	Is a boot loader parameter.
+ 	BUGS=	Relates to possible processor bugs on the said processor.
+ 	KNL	Is a kernel start-up parameter.
++	FDT	Is a flattend device tree parameter.
+ 
+ 
+ Kernel parameters
+@@ -1737,6 +1738,15 @@ Kernel parameters
+ 			See Documentation/admin-guide/sysctl/net.rst for
+ 			fb_tunnels_only_for_init_ns
+ 
++	fdt.enable=
++	fdt.disable=
++			[KNL,FDT]
++			update device tree node status before populating devices
++			Format: fdt.<enable|disable>=<path>[,<path>]
++			enable    := update the device node to a enabled state
++			disable   := update the device node to a disabled state
++			<path>    := node path or node full name in device tree
++
+ 	floppy=		[HW]
+ 			See Documentation/admin-guide/blockdev/floppy.rst.
+ 
+diff --git a/drivers/of/fdt.c b/drivers/of/fdt.c
+index 331646d667b9..678d79f32937 100644
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
+@@ -32,6 +32,11 @@
+ 
+ #include "of_private.h"
+ 
++static char *enable;
++module_param(enable, charp, 0444);
++static char *disable;
++module_param(disable, charp, 0444);
++
+ /*
+  * __dtb_empty_root_begin[] and __dtb_empty_root_end[] magically created by
+  * cmd_wrap_S_dtb in scripts/Makefile.dtbs
+@@ -452,6 +457,70 @@ void *of_fdt_unflatten_tree(const unsigned long *blob,
+ }
+ EXPORT_SYMBOL_GPL(of_fdt_unflatten_tree);
+ 
++/*
++ * The format for the command line is as follows:
++ *
++ * fdt.<enable|disable>=<path>[,<path>]
++ * enable    := update the device node to a enabled state
++ * disable   := update the device node to a disabled state
++ * <path>    := node path or node full name in device tree
++ *
++ * e.g:
++ *	fdt.enable=/soc/aips-bus@02100000/i2c@021a8000,/soc/aips-bus@02100000/weim@021b8000
++ *	fdt.disable=/soc/aips-bus@02100000/weim@021b8000
++ */
++static int __init __of_flat_parse_param(char *s, bool enable)
++{
++	char path[256], *p;
++
++	if (!s)
++		return 0;
++
++	p = s;
++	while (*s != '\0') {
++		p = strchr(s, ',');
++		if (p != NULL) {
++			BUG_ON((p - s) >= 256);
++			strncpy(path, s, p - s);
++			path[p - s] = '\0';
++			if (enable)
++				of_node_status_enable_by_path(path);
++			else
++				of_node_status_disable_by_path(path);
++			/* search for next node */
++			s = p + 1;
++		} else {
++			/* last node */
++			if (enable)
++				of_node_status_enable_by_path(s);
++			else
++				of_node_status_disable_by_path(s);
++			break;
++		}
++	}
++
++	return 0;
++}
++
++static inline void __init of_flat_parse_param(void)
++{
++	__of_flat_parse_param(enable, 1);
++	__of_flat_parse_param(disable, 0);
++}
++
++/*
++ * handle device node status update
++ */
++static int __init of_flat_late_init(void)
++{
++	of_flat_parse_param();
++
++	return 0;
++}
++
++/* we use postcore_init to run before mach code populate platform devices */
++postcore_initcall(of_flat_late_init);
++
+ /* Everything below here references initial_boot_params directly. */
+ int __initdata dt_root_addr_cells;
+ int __initdata dt_root_size_cells;
+-- 
+2.43.0
+

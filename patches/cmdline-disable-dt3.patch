@@ -1,0 +1,236 @@
+From 690035e97fa6943ac49bfc38d9dc37cb62d4a596 Mon Sep 17 00:00:00 2001
+From: Dong Aisheng <b29396@freescale.com>
+Date: Thu, 15 Aug 2013 18:55:33 +0800
+Subject: [PATCH 3/3] of: add node status update via name format with cmdline
+
+The node full patch is a bit long to use in the command line to
+update the device node status, so we add a more convenient way to
+simply use device node name in device tree.
+
+e.g:
+formerly:
+fdt.enable=/soc/aips-bus@02100000/i2c@021a8000,/soc/aips-bus@02100000/weim@021b8000
+fdt.disable=/soc/aips-bus@02100000/weim@021b8000
+now:
+fdt.enable=i2c@021a8000,weim@021b8000
+fdt.disable=weim@021b8000
+
+Signed-off-by: Dong Aisheng <b29396@freescale.com>
+---
+ .../admin-guide/kernel-parameters.txt         |  3 +-
+ drivers/of/base.c                             | 33 +++++++++
+ drivers/of/fdt.c                              | 72 +++++++++++++++----
+ include/linux/of.h                            |  8 +++
+ 4 files changed, 103 insertions(+), 13 deletions(-)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index f3a4d6588694..f07a89b4ea59 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -1742,10 +1742,11 @@ Kernel parameters
+ 	fdt.disable=
+ 			[KNL,FDT]
+ 			update device tree node status before populating devices
+-			Format: fdt.<enable|disable>=<path>[,<path>]
++			Format: fdt.<enable|disable>=<path|node>[,<path|node>]
+ 			enable    := update the device node to a enabled state
+ 			disable   := update the device node to a disabled state
+ 			<path>    := node path or node full name in device tree
++			<node>    := node name in device tree
+ 
+ 	floppy=		[HW]
+ 			See Documentation/admin-guide/blockdev/floppy.rst.
+diff --git a/drivers/of/base.c b/drivers/of/base.c
+index 2968dc3fecc9..61b785066cde 100644
+--- a/drivers/of/base.c
++++ b/drivers/of/base.c
+@@ -22,6 +22,7 @@
+ #include <linux/cpu.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+ #include <linux/spinlock.h>
+@@ -1026,6 +1027,38 @@ struct device_node *of_find_node_by_name(struct device_node *from,
+ }
+ EXPORT_SYMBOL(of_find_node_by_name);
+ 
++/**
++ *	of_find_node_by_name_and_reg - Find a node by its "name" and "reg" property
++ *	@from:	The node to start searching from or NULL, the node
++ *		you pass will not be searched, only the next one
++ *		will; typically, you pass what the previous call
++ *		returned. of_node_put() will be called on it
++ *	@name:	The name string to match against
++ *	@reg:	The reg address to match against
++ *
++ *	Returns a node pointer with refcount incremented, use
++ *	of_node_put() on it when done.
++ */
++struct device_node *of_find_node_by_name_and_reg(struct device_node *from,
++	const char *name, resource_size_t reg)
++{
++	struct device_node *np;
++	struct resource res;
++
++	while ((np = of_find_node_by_name(from, name)) != NULL) {
++		if (!of_address_to_resource(np, 0, &res))
++			if ((res.start == reg) && of_node_get(np)) {
++				pr_debug("find node %s 0x%llx: %s\n", name,
++						reg, np->full_name);
++				break;
++			}
++		from = np;
++	}
++
++	return np;
++}
++EXPORT_SYMBOL(of_find_node_by_name_and_reg);
++
+ /**
+  * of_find_node_by_type - Find a node by its "device_type" property
+  * @from:	The node to start searching from, or NULL to start searching
+diff --git a/drivers/of/fdt.c b/drivers/of/fdt.c
+index 678d79f32937..e749f3ac1f12 100644
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
+@@ -457,21 +457,56 @@ void *of_fdt_unflatten_tree(const unsigned long *blob,
+ }
+ EXPORT_SYMBOL_GPL(of_fdt_unflatten_tree);
+ 
++static int of_flat_update_node_by_name(const char *s, bool enable)
++{
++	char node[256];
++	char *r, *p;
++	struct device_node *np;
++	unsigned long reg;
++
++	if (!s)
++		return -EINVAL;
++
++	p = strchr(s, '@');
++	if (p) {
++		strncpy(node, s, p - s);
++		node[p - s] = '\0';
++		r = p + 1;
++		if (kstrtoul(r, 16, &reg))
++			return -EINVAL;
++
++		np = of_find_node_by_name_and_reg(NULL, node, reg);
++	} else {
++		np = of_find_node_by_path(s);
++	}
++	if (!np) {
++		pr_warn("%s: unable to find node %s\n", __func__, s);
++		return -ENODEV;
++	}
++
++	return enable ? of_node_status_enable(np) :
++			of_node_status_disable(np);
++}
++
+ /*
+  * The format for the command line is as follows:
+  *
+- * fdt.<enable|disable>=<path>[,<path>]
++ * fdt.<enable|disable>=<path|node>[,<path|node>]
+  * enable    := update the device node to a enabled state
+  * disable   := update the device node to a disabled state
+  * <path>    := node path or node full name in device tree
++ * <node>    := node name in device tree
+  *
+  * e.g:
+  *	fdt.enable=/soc/aips-bus@02100000/i2c@021a8000,/soc/aips-bus@02100000/weim@021b8000
+  *	fdt.disable=/soc/aips-bus@02100000/weim@021b8000
++ *	or
++ *	fdt.enable=i2c@021a8000,weim@021b8000
++ *	fdt.disable=weim@021b8000
+  */
+ static int __init __of_flat_parse_param(char *s, bool enable)
+ {
+-	char path[256], *p;
++	char node[256], *p;
+ 
+ 	if (!s)
+ 		return 0;
+@@ -481,20 +516,31 @@ static int __init __of_flat_parse_param(char *s, bool enable)
+ 		p = strchr(s, ',');
+ 		if (p != NULL) {
+ 			BUG_ON((p - s) >= 256);
+-			strncpy(path, s, p - s);
+-			path[p - s] = '\0';
+-			if (enable)
+-				of_node_status_enable_by_path(path);
+-			else
+-				of_node_status_disable_by_path(path);
++			strncpy(node, s, p - s);
++			node[p - s] = '\0';
++			if (*s != '/') {
++				/* device tree node name */
++				of_flat_update_node_by_name(node, enable);
++			} else {
++				if (enable)
++					of_node_status_enable_by_path(s);
++				else
++					of_node_status_disable_by_path(s);
++			}
++
+ 			/* search for next node */
+ 			s = p + 1;
+ 		} else {
+ 			/* last node */
+-			if (enable)
+-				of_node_status_enable_by_path(s);
+-			else
+-				of_node_status_disable_by_path(s);
++			if (*s != '/') {
++				/* device tree node name */
++				of_flat_update_node_by_name(s, enable);
++			} else {
++				if (enable)
++					of_node_status_enable_by_path(s);
++				else
++					of_node_status_disable_by_path(s);
++				}
+ 			break;
+ 		}
+ 	}
+@@ -1386,6 +1432,8 @@ void __init unflatten_and_copy_device_tree(void)
+ 	unflatten_device_tree();
+ }
+ 
++
++
+ #ifdef CONFIG_SYSFS
+ static int __init of_fdt_raw_init(void)
+ {
+diff --git a/include/linux/of.h b/include/linux/of.h
+index 92e871b480a8..84700b6c9eb4 100644
+--- a/include/linux/of.h
++++ b/include/linux/of.h
+@@ -268,6 +268,8 @@ static inline const char *of_node_full_name(const struct device_node *np)
+ #define for_each_of_allnodes(dn) for_each_of_allnodes_from(NULL, dn)
+ extern struct device_node *of_find_node_by_name(struct device_node *from,
+ 	const char *name);
++extern struct device_node *of_find_node_by_name_and_reg(struct device_node *from,
++	const char *name, resource_size_t reg);
+ extern struct device_node *of_find_node_by_type(struct device_node *from,
+ 	const char *type);
+ extern struct device_node *of_find_compatible_node(struct device_node *from,
+@@ -514,6 +516,12 @@ static inline struct device_node *of_find_node_by_name(struct device_node *from,
+ 	return NULL;
+ }
+ 
++static inline struct device_node *of_find_node_by_name_and_reg(
++		struct device_node *from, const char *name, resource_size_t reg)
++{
++	return NULL;
++}
++
+ static inline struct device_node *of_find_node_by_type(struct device_node *from,
+ 	const char *type)
+ {
+-- 
+2.43.0
+
