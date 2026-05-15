@@ -1,6 +1,13 @@
 #!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+#
 # boot_data_parser.py
 #  This is a python module for parsing boot-data files
+#
+# Author: Tim Bird <tim.bird@sony.com>
+#
+# Copyright 2026 Sony Group Corporation
+#
 
 import sys
 import os

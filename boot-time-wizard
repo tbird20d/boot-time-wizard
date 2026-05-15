@@ -6,6 +6,10 @@
 #   Run a series of measurements and tests, to try to optimize boot-time
 #     for a platform
 #
+# Author: Tim Bird <tim.bird@sony.com>
+#
+# Copyright 2026 Sony Group Corporation
+#
 # todo:
 # - test looping
 #   - does kernel_id (run portion) increment correctly?

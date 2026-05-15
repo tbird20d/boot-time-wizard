@@ -1,11 +1,15 @@
 #!/usr/bin/python3
-# SPDX-License-Identifier: GPL-2.0-only
+# SPDX-License-Identifier: MIT
 # vim: set ts=4 sw=4 et :
 #
 # boot-data - show info from a boot-data file in a friendly way
 #
+# Author: Tim Bird <tim.bird@sony.com>
+#
+# Copyright 2026 Sony Group Corporation
+#
 # todo:
-#  - add diff command - do a smart diff between two files
+#   support diff_processes
 
 import sys
 import os
