@@ -39,22 +39,19 @@
 #  for a given item:
 #    baseline: instrument, build, boot, measure, check functionality
 #    test: alter, build, boot, measure, check functionality
-#    analyze: compare results, make recommendations
 #    recover: de-instrument, restore (build, boot, check)
+#    analyze: compare results, make recommendations
 #
 # Notes:
 # - use instrumentation to determine if a kernel feature is used or not,
 #    and turn it off in kernel config, dt, command line, systemd, or in source
 # - instrumentation can use /proc, /sys, ftrace, inserted printks
-#   - printks could be programmatically inserted (maybe by AI?)
+#   - printks can be programmatically inserted (maybe by AI?)
 # - need to validate that nothing breaks with a comprehensive workload and
 #   test cycle
 # - examples:
 #   - disable or remove all DT devices that are not loaded during a normal boot
-# - need classes with methods for:
-#   - instrument, build, boot, measure, check-functionality, alter,
-#   - compare, restore
-# - need lists of items to try: bluetooth, sound, video, serial console,
+# - lists of items to try: bluetooth, sound, video, serial console,
 #   - wifi, disable polkit, disable ptrace, disable users,
 #   - trim filesystems, trim code, remove unused dma items, remove drivers,
 #   - remove unused crypto algorithms, remove unused syscalls
@@ -917,19 +914,32 @@ all applied methods.
 
 Options:
  -h, --help    Show this usage help
+
  -m <method>   Test specified optimization method
+
  -l            List optimization methods
+
  -t <target>   Specify the target to run tests on
+
  -d <dir>      Use <dir> for artifacts and test results
                (default is the './btw-artifacts')
- -k <kernel_dir> Use <kernel_dir> as the kernel source directory.
-               This is required by some optimization methods.  If not
-               specified, the code will see if the current directory or
-               'linux' is a kernel source dir.  If a kernel source dir
-               cannot be found, optimizations that require it will be
-               skipped.
+
+ -k <kdir>     Use <kdir> as the kernel source directory.
+               A kernel dir is required by some optimization methods,
+               usually to allow instrumenting and rebuilding the kernel.
+               If not specified, The program will detect if the current
+               directory or 'linux' is a kernel source dir, and use that.
+               If a kernel source dir cannot be found, optimizations
+               that require it will be skipped.
+               This overrides the kernel src directory provided by the
+               target (in the ttc configuration).
+
  -v            Show verbose output.  When used with -l and -t, shows
                the status of each optimization method on the given target.
+
+ -V, --version Show program version and exit.
+
+Test options:
  --debug       Show debug information
  -r <run_id>   Generate a report from boot-data files from the indicated
                run_id.  Other parameters, such as -m, -t and -k must be
@@ -1353,6 +1363,10 @@ def main():
 
     if "-h" in sys.argv or "--help" in sys.argv:
         usage()
+
+    if "-V" in sys.argv or "--version" in sys.argv:
+        print("boot-time-wizard version v%d.%d.%d" % VERSION)
+        sys.exit(0)
 
     verbose = get_boolean_opt('-v')
     debug = get_boolean_opt('--debug')
