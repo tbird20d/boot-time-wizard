@@ -15,16 +15,10 @@
 #   - does kernel_id (run portion) increment correctly?
 #   - does source, cmdline, config get restored correctly?
 # - manage method.needs_kbuild
-# - use KERNEL_SRC from target unless overridden by -k
-#   - make use of -k optional
 # - hide stderr from builds, if requested (default opt-in to build messages)
 #   - or show if requested (default opt-out to build messages)
 # - detect build failures
 # - handle different optimization methods:
-#   + change kernel config
-#   + change command line setting
-#     + add low_mem
-#   + disable devicetree entries
 #   - remove udev entries
 #   - remove SELinux rules
 # - during test, check that system still behaves properly
