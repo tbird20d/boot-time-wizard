@@ -209,6 +209,15 @@ def do_list(file1, item_type):
 
     sys.exit(0)
 
+def show_multiple(name, value_dict):
+    units = "usecs"
+    name_vals = value_dict.items()
+    name_val = sorted(name_vals, key=itemgetter(1), reverse=True)
+
+    print(name)
+    for name, value in name_val:
+        print("  %-40s %12s %s" % (name, value, units))
+
 def do_show(file1, options):
     items = options
 
@@ -226,6 +235,17 @@ def do_show(file1, options):
         doing_multiple = True
 
     for item in items:
+        # show es of some items
+        if item in "regions":
+            show_multiple('regions', bd.regions)
+            break
+        if item == "initcalls":
+            show_multiple('initcalls', bd.initcalls)
+            break
+        if item == "systemd":
+            show_multiple('systemd items', bd.systemd_items)
+            break
+
         value = bd.get_any(item)
         if value=="**missing**":
             error_out("Could not find '%s' in boot data file %s" % (item, file1))
