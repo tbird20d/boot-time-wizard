@@ -290,6 +290,8 @@ class config_om_class(opt_method_class):
         return
 
     def restore_baseline(selfcm, target):
+        target.change_to_src_dir()
+
         target.restore_build_config()
 
         print(" - Rebuilding kernel...")
@@ -1492,7 +1494,7 @@ def main():
         # rebuild kernel
         target.clear_localversion()
         print(" - Rebuilding and installing kernel...")
-        status = target.rebuild_and_install("kbuild")
+        status = target.rebuild_and_install()
 
         # reboot one last time to return to baseline kernel and settings
         target.ttc("reboot")
