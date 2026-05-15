@@ -20,7 +20,7 @@ selected optimization technique:
  * building, installing, and booting the instrumented kernel
  * gathering baseline boot-time data
  * applying the specified optimization technique
- * building, installing, (if appropriate) and booting an optimized kernel
+ * building, installing (if appropriate), and booting an optimized kernel
  * gathering results boot-time data
  * comparing the baseline data with the results data to create a report
    of changes to the system
