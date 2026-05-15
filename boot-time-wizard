@@ -15,6 +15,8 @@
 #   - does kernel_id (run portion) increment correctly?
 #   - does source, cmdline, config get restored correctly?
 # - manage method.needs_kbuild
+# - use KERNEL_SRC from target unless overridden by -k
+#   - make use of -k optional
 # - hide stderr from builds, if requested (default opt-in to build messages)
 #   - or show if requested (default opt-out to build messages)
 # - detect build failures
@@ -78,6 +80,7 @@ from signal import signal, SIGPIPE, SIG_DFL
 from subprocess import getstatusoutput
 import subprocess
 import random
+import time
 
 debug = False
 verbose = False
@@ -99,9 +102,12 @@ def error_out(msg, rcode=-1):
     eprint(msg)
     sys.exit(rcode)
 
+WARNING_SLEEP_SECS=5
+
 def wprint(msg):
     sys.stderr.write("Warning: " + msg + '\n')
     sys.stderr.flush()
+    time.sleep(WARNING_SLEEP_SECS)
 
 def dprint(msg):
     global debug
@@ -198,9 +204,6 @@ class opt_method_class():
         raise NotImplementedError
 
     def instrument_target(selfm, target):
-        # FIXTHIS - could support cmdline instrumentation,
-        #   like adding 'log_buf_len=1M quiet initcall' to cmdline
-
         # all instrumentation actions occur while we're in the kernel src dir
         target.change_to_src_dir()
 
@@ -314,9 +317,9 @@ class config_om_class(opt_method_class):
             return (False, "config %s not found" % config_name)
 
         if configs[config_name] == config_value:
-            return (True, "config %s has the value %s" % config_name, config_value)
+            return (True, "config %s has the value '%s'" % config_name, config_value)
         else:
-            return (False, "config %s: current value of %s does not match desired value of %s" % (config_name, configs[config_name], config_value))
+            return (False, "config %s: current value '%s' != optimized value %s" % (config_name, configs[config_name], config_value))
 
     def apply_optimization(selfcm, target, kernel_id):
         target.change_to_src_dir()
@@ -454,7 +457,7 @@ class dt_om_class(opt_method_class):
         if status == "disabled":
             return (True, "device-tree node '%s' is already disabled" % dt_name)
         else:
-            return (False, "device-tree node '%s': current status of '%s' does not match desired status 'disabled'" % (dt_name, status))
+            return (False, "device-tree node '%s': current status is: '%s'" % (dt_name, status))
 
     def apply_optimization(selfdtm, target, kernel_id):
         # check if config is different from requested value
@@ -498,6 +501,7 @@ class target_class():
         if not os.path.isfile(selft.KERNEL_SRC + "/MAINTAINERS"):
             wprint("Missing MAINTAINERS file in KERNEL_SRC dir: %s - check configuration" % selft.KERNEL_SRC)
             dprint("current dir=%s" % os.getcwd())
+
         # make KERNEL_SRC path absolute
         selft.KERNEL_SRC = os.path.abspath(selft.KERNEL_SRC)
 
@@ -807,8 +811,11 @@ class target_class():
         # load file
         lines = open(full_path, "r").readlines()
         new_lines = []
+
+        # only add at first location
+        added = False
         for line in lines:
-            if re.search(expr, line):
+            if (not added) and re.search(expr, line):
                 # got a match, insert the line
                 left_whitespace_len = len(line) - len(line.lstrip())
                 prefix = line[:left_whitespace_len]
@@ -819,7 +826,7 @@ class target_class():
                 else:
                     new_lines.append(line)
                     new_lines.append(new_line)
-
+                added = True
             else:
                 new_lines.append(line)
 
@@ -827,6 +834,9 @@ class target_class():
 
         with open(full_path, "w") as outfile:
             outfile.write(content)
+
+        if not added:
+            wprint("Could not add printk %s %s" % (position, location))
 
 
     def unapply_patches(selft):
@@ -951,6 +961,17 @@ Test options:
 """)
     sys.exit(0)
 
+# add printk instrumentation before and after a function call.
+# The first function call in the file will be instrumented.
+def add_function_instr(m, file, function):
+    # function name must have only whitespace in front (to avoid
+    # catching declarations), and have a '(' at the end
+    # (to avoid partial function name matches)
+    location = file + ":" + "^\\W+"+function + "\\("
+    # use called function name as the region name
+    m.add_instrumentation(("printk", function, "before", location))
+    m.add_instrumentation(("printk", function, "after", location))
+
 # returns a list of method instances
 def init_methods(kernel_dir):
     # add methods
@@ -963,12 +984,12 @@ def init_methods(kernel_dir):
     if kernel_dir:
         m = config_om_class("disable-bluetooth-config", "Disable bluetooth by compiling kernel without it.", "CONFIG_BT", "N")
         m.compare_list = ["CONFIG_BT", "bt_init", "bluetooth.service"]
-        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+        m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
         methods[m.name] = m
 
         m = config_om_class("disable-sound-config", "Disable sound by compiling kernel without it.", "CONFIG_SOUND", "N")
         m.compare_list = ["CONFIG_SOUND", "alsa_pcm_init", "alsa_sound_init", "alsa_timer_init", "init_soundcore", "systemd-modules-load.service"]
-        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+        m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
         methods[m.name] = m
 
         m = config_om_class("disable-graphics-config", "Disable graphics by compiling kernel without it.", "CONFIG_DRM", "N")
@@ -976,14 +997,31 @@ def init_methods(kernel_dir):
         m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
         methods[m.name] = m
 
-    m = cmdline_om_class("low-mem-cmdline", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
-    m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
+        m = config_om_class("disable-usb-config", "Disable USB by compiling kernel without it.", "CONFIG_USB", "N")
+        m.compare_list = ["CONFIG_USB"]
+        m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
+        methods[m.name] = m
 
+    m = cmdline_om_class("low-mem-500M-cmdline", "Reduce memory configure (to 500M) using cmdline option", "mem=500M")
+    m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
     # FIXTHIS - these instrumentations should be generally applied
     m.add_instrumentation(("patch","early-times.patch"))
     #m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
     #m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
     m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+    methods[m.name] = m
+
+    m = cmdline_om_class("low-mem-1G-cmdline", "Reduce memory configure (to 1G) using cmdline option", "mem=1G")
+    m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
+    m.add_instrumentation(("patch","early-times.patch"))
+
+    # add some printk instrumentation
+    add_function_instr(m, "init/main.c", "mm_core_init_early")
+    add_function_instr(m, "init/main.c", "early_numa_node_init")
+    add_function_instr(m, "init/main.c", "mm_core_init")
+    add_function_instr(m, "init/main.c", "anon_vma_init")
+
+    m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
     methods[m.name] = m
 
     m = dt_om_class("disable-bluetooth-dt", "Disable bluetooth device-tree node.", "bluetooth")
@@ -996,7 +1034,7 @@ def init_methods(kernel_dir):
     #m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
     #m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
 
-    m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+    m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
     methods[m.name] = m
 
     dprint("== Methods ==")
@@ -1019,6 +1057,8 @@ def init_methods(kernel_dir):
 
     return methods
 
+# target can resolve to False, in which case showing
+# optimization status is not available
 def list_methods(methods, target):
     global verbose
 
@@ -1359,7 +1399,7 @@ def main():
     method_name = None
     artifact_dir = ""
     artifact_dir_created = False
-    kernel_dir = ""
+    override_kernel_dir = ""
     do_list = False
     do_gen_report = False
 
@@ -1377,6 +1417,7 @@ def main():
     if "-t" in sys.argv:
         target_name = get_opt_with_arg('-t')
         try:
+            # this can take some time
             target = target_class(target_name)
         except ValueError:
             error_out("'%s' is not a recognized target" % target_name)
@@ -1389,11 +1430,11 @@ def main():
         artifact_dir = os.path.abspath(artifact_dir)
 
     if "-k" in sys.argv:
-        kernel_dir = get_opt_with_arg('-k')
-        if not os.path.isdir(kernel_dir):
-            error_out("'%s' does not exist: Invalid argument for -k" % kernel_dir)
-        if not os.path.isfile(kernel_dir + "/MAINTAINERS"):
-            error_out("Missing 'MAINTAINERS'; '%s' does not not appear to be a kernel source directory" % kernel_dir)
+        override_kernel_dir = get_opt_with_arg('-k')
+        if not os.path.isdir(override_kernel_dir):
+            error_out("'%s' does not exist: Invalid argument for -k" % override_kernel_dir)
+        if not os.path.isfile(override_kernel_dir + "/MAINTAINERS"):
+            error_out("Missing 'MAINTAINERS'; '%s' does not not appear to be a kernel source directory" % override_kernel_dir)
 
     if "-m" in sys.argv:
         method_name = get_opt_with_arg('-m')
@@ -1403,14 +1444,18 @@ def main():
         do_gen_report = True
 
     # done parsing command line
-    # do more initialization
 
-    # use previously determined patch dir
-    if target:
-        target.patch_dir = patch_dir
+    # do more initialization
+    kernel_dir = ""
+    if override_kernel_dir:
+        kernel_dir = override_kernel_dir
+    else:
+        # presumably target has a KERNEL_SRC setting
+        if target:
+            kernel_dir = target.KERNEL_SRC
 
     # try to auto-detect the kernel source directory
-    if not kernel_dir:
+    if not kernel_dir or not os.path.isfile(kernel_dir + "/MAINTAINERS"):
         # try to find one
         if os.path.isfile("MAINTAINERS"):
             kernel_dir = "."
@@ -1421,19 +1466,8 @@ def main():
         else:
             error_out("No kernel source dir specified.")
 
-    methods = init_methods(kernel_dir)
-
-    # handle '-l' before making artifact dir, it's just informational
-    if do_list:
-        list_methods(methods, target)
-        sys.exit(0)
-
-    # check for valid method_name
-    if method_name:
-        if method_name not in methods:
-            error_out("Invalid argument for -m: method '%s' is not recognized (use -l to list)" % method_name)
-        else:
-            method = methods[method_name]
+    kernel_dir = os.path.abspath(kernel_dir)
+    dprint(f"{kernel_dir=}")
 
     # if no artifact-dir specified, create one in .
     if not artifact_dir:
@@ -1446,11 +1480,35 @@ def main():
 
     # make artifact_dir absolute
     artifact_dir = os.path.abspath(artifact_dir)
+    dprint(f"{artifact_dir=}")
+
+    # fixup target with extra info and overrides
     if target:
         target.artifact_dir = artifact_dir
+        target.patch_dir = patch_dir
+        # warn if we're about to use an unexpected kernel_dir
+        if target.KERNEL_SRC != kernel_dir:
+            wprint("Overriding target's KERNEL_SRC dir ('%s') with '%s'" % (target.KERNEL_SRC, kernel_dir))
+        target.KERNEL_SRC = kernel_dir
 
+    vprint("Initializing methods...")
+    methods = init_methods(kernel_dir)
+
+    # handle '-l' before making artifact dir, it's just informational
+    if do_list:
+        list_methods(methods, target)
+        sys.exit(0)
+
+    # OK - we're testing an optimization.  This requires a target.
     if not target:
-        error_out("You must specify a target to optimize. Use -h for help.")
+        error_out("You must specify a target to test optimization. Use -h for help.")
+
+    # check for valid method_name
+    if method_name:
+        if method_name not in methods:
+            error_out("Invalid argument for -m: method '%s' is not recognized (use -l to list)" % method_name)
+        else:
+            method = methods[method_name]
 
     # OK - we're doing an optimization run
     # set the run_prefix and kernel_id
