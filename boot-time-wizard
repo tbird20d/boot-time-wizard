@@ -117,7 +117,7 @@ def vprint(msg):
 
 # use 'TRB' in name so I can find and move it easily
 def TRB_wait_for_input(msg):
-    return(input("%s: continue? " % msg))
+    return(input("** %s: continue? " % msg))
 
 def is_readable_file(filepath):
     real_path = os.path.realpath(filepath)
@@ -476,6 +476,64 @@ class dt_om_class(opt_method_class):
         if status != 0:
              eprint("Could not set current configured command line")
         return
+
+# the optimization method class for kernel command line options
+class systemd_om_class(opt_method_class):
+    def __init__(selfsdm, name, description, option_str):
+        super().__init__(name, description, "systemd")
+        selfsdm.unit_name = option_str
+
+    def save_baseline(selfsdm, target):
+        # save the current (configured) target cmdline
+        cmd = "SYSTEMD_COLORS=0 systemctl list-unit-files -l --no-pager"
+        status, cur_unit_status = target.run(cmd)
+        saved_systemd_path = target.artifact_prefix + "saved_systemd.txt"
+        with open(saved_systemd_path, "w") as fd:
+                  fd.write(cur_unit_status)
+        return
+
+    def restore_baseline(selfsdm, target):
+        # restore all units to original status
+        saved_systemd_path = target.artifact_prefix + "saved_systemd.txt"
+        unit_status = open(saved_systemd_path, "r").read().rstrip()
+        # FIXTHIS - add code to restore systemd status based on saved unit status list
+        wprint("Restore_baseline() not finished for systemd_om_class")
+        #TRB_wait_for_input("** Press enter to continue> ")
+
+    def detect_optimization(selfsdm, target):
+        # report whether this optimization is already applied
+        # check state, return a tuple
+        cmd = '"systemctl is-enabled %s"' % selfsdm.unit_name
+        status, output = target.run(cmd)
+        unit_state = output.strip()
+        if unit_state not in ["enabled", "disabled", "not-found"]:
+            wprint("problem reading UnitFileState: %s" % output)
+            unit_state = "unknown"
+
+        if unit_state == "disabled":
+            return (True, "unit '%s' is already disabled" % selfsdm.unit_name)
+        elif unit_state == "enabled":
+            return (False, "unit '%s' is enabled" % selfsdm.unit_name)
+        elif unit_state == "not-found":
+            return (False, "Did not find '%s' on target" % selfsdm.unit_name)
+        else:
+            return (False, "Unexpected error with systemctl")
+
+    def apply_optimization(selfsdm, target, kernel_id):
+        print(" - Applying optimization: disabling '%s'" % selfsdm.unit_name)
+
+        cmd = "systemctl disable " +  selfsdm.unit_name
+        status, output = target.run(cmd)
+        if status != 0:
+             eprint("Could not disable %s" % selfsdm.unit_name)
+        return status
+
+    def undo_optimization(selfsdm, target):
+        status, output = target.run("systemctl enable " + selfsdm.unit_name)
+        if status != 0:
+            eprint("Could not enable %s: output='%s'" % (selfsdm.unit_name, output))
+        return
+
 
 class target_class():
     def __init__(selft, name):
@@ -988,7 +1046,7 @@ def init_methods(kernel_dir):
 
         m = config_om_class("disable-graphics-config", "Disable graphics by compiling kernel without it.", "CONFIG_DRM", "N")
         m.compare_list = ["CONFIG_DRM"]
-        m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+        m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
         methods[m.name] = m
 
         m = config_om_class("disable-usb-config", "Disable USB by compiling kernel without it.", "CONFIG_USB", "N")
@@ -1000,9 +1058,7 @@ def init_methods(kernel_dir):
     m.compare_list = ["MEM_TOTAL", "MEM_USED", "mm"]
     # FIXTHIS - these instrumentations should be generally applied
     m.add_instrumentation(("patch","early-times.patch"))
-    #m.add_instrumentation(("printk","test_region", "before","init/main.c:kfence_init"))
-    #m.add_instrumentation(("printk","test_region", "after","init/main.c:profile_init"))
-    m.add_instrumentation(("cmdline","quiet log_buf_len=1m initcall_debug"))
+    m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
     methods[m.name] = m
 
     m = cmdline_om_class("low-mem-1G-cmdline", "Reduce memory configure (to 1G) using cmdline option", "mem=1G")
@@ -1031,10 +1087,18 @@ def init_methods(kernel_dir):
     m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
     methods[m.name] = m
 
+    # define a few systemd service disable methods
+    m = systemd_om_class("disable-modem-manager-systemd", "Disable ModemManager.service.", "ModemManager.service")
+    m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
+    methods[m.name] = m
+
+    m = systemd_om_class("disable-avahi-daemon-systemd", "Disable avahi-daemon.service.", "avahi-daemon.service")
+    m.add_instrumentation(("cmdline","quiet log_buf_len=2M initcall_debug"))
+    methods[m.name] = m
+
     dprint("== Methods ==")
     dprint(methods)
 
-    # FIXTHIS - add more methods here
 
     # candidate methods:
     #   optimize udev (remove unused udev rules)
@@ -1063,9 +1127,9 @@ def list_methods(methods, target):
             # show the status of optimization methods for the indicated target
             has_method, msg = m.detect_optimization(target)
             if has_method:
-                print(", present (%s)" % msg)
+                print(", already present\n     (%s)" % msg)
             else:
-                print(", NOT applied (%s)" % msg)
+                print(", not applied\n     (%s)" % msg)
         else:
             print()
 
@@ -1542,11 +1606,12 @@ def main():
         print("== De-Instrumenting target")
         method.de_instrument_target(target)
 
-        # get back to baseline (previous) kernel
-        # rebuild kernel
-        target.clear_localversion()
-        print(" - Rebuilding and installing kernel...")
-        status = target.rebuild_and_install()
+        if method.needs_kbuild:
+            # get back to baseline (previous) kernel (if needed)
+            # rebuild kernel
+            target.clear_localversion()
+            print(" - Rebuilding and installing kernel...")
+            status = target.rebuild_and_install()
 
         # reboot one last time to return to baseline kernel and settings
         target.ttc("reboot")
