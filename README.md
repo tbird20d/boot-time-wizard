@@ -31,7 +31,7 @@ It also allows you to see what breaks if you use a particular
 optimization technique.
 
 ## Dependencies
-The boot-time-wizard uses `'ttc'` (see https://github.com/tbird/ttc) as
+The boot-time-wizard uses `'ttc'` (see https://github.com/tbird20d/ttc) as
 its board access and management tool.  You should have configured
 ttc with full support for: 1) building and install a kernel,
 2) accessing a board, and controlling its power and boot, 3) manipulating
